@@ -32,10 +32,13 @@ iwr -useb https://raw.githubusercontent.com/atharva7577/axon-cli/main/install.ps
 ### Direct (any platform, requires Node ≥ 20)
 
 ```sh
-npm i -g github:atharva7577/axon-cli
+npm i -g github:atharva7577/axon-cli --install-links
 ```
 
-Once published to npm, the canonical install becomes `npm i -g @axon/cli`.
+`--install-links` forces npm to copy the package instead of creating a junction
+to its temp git-clone — without it the install looks like it succeeded but the
+`axon` shim points to a deleted directory. (Once `@axon/cli` is published to
+npm the canonical install becomes `npm i -g @axon/cli` with no extra flags.)
 
 ---
 

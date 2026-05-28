@@ -55,9 +55,13 @@ if (-not $npmExe) {
 }
 
 # ─── install ────────────────────────────────────────────────────────────────
-Write-Host "  Installing @axon/cli from github:$Repo (this runs the package's build script)…"
+Write-Host "  Installing @axon/cli from github:$Repo…"
 Write-Host ''
-& npm install -g "github:$Repo"
+# --install-links forces npm to COPY files instead of creating a junction to
+# its temp git-clone dir. Without it, the temp dir gets cleaned up after the
+# install and the global `axon` shim points at a dangling path — the classic
+# Windows-only failure mode for `npm i -g github:user/repo`.
+& npm install -g "github:$Repo" --install-links
 if ($LASTEXITCODE -ne 0) {
   Abort "npm install failed with exit code $LASTEXITCODE."
 }

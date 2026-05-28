@@ -38,9 +38,13 @@ command -v npm >/dev/null 2>&1 || fail \
   "npm not found in PATH. It usually ships with Node — make sure your install is complete."
 
 # ─── install ─────────────────────────────────────────────────────────────────
-log "  Installing @axon/cli from github:${REPO} (this runs the package's build script)…"
+log "  Installing @axon/cli from github:${REPO}…"
 log ""
-npm install -g "github:${REPO}"
+# --install-links forces npm to COPY files instead of creating a junction to
+# its temp git-clone dir. Without it, the temp dir gets cleaned up after the
+# install and the global \`axon\` shim points at a dangling path. See
+# https://github.com/npm/cli/issues#installing-from-git-on-windows
+npm install -g "github:${REPO}" --install-links
 
 # ─── done ────────────────────────────────────────────────────────────────────
 log ""
