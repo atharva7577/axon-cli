@@ -1,0 +1,16 @@
+# Default: normalise to LF on commit, restore native on checkout.
+* text=auto
+
+# Shell scripts MUST stay LF — CRLF breaks the shebang.
+*.sh         text eol=lf
+install.sh   text eol=lf
+
+# Markdown / source — LF for cross-platform consistency.
+*.md         text eol=lf
+*.ts         text eol=lf
+*.json       text eol=lf
+*.config.ts  text eol=lf
+.gitignore   text eol=lf
+
+# PowerShell convention: CRLF on disk.
+*.ps1        text eol=crlf

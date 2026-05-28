@@ -1,0 +1,64 @@
+{
+  "name": "@axon/cli",
+  "version": "0.0.3",
+  "description": "AXON — the terminal-native client for the routing + execution-memory runtime.",
+  "type": "module",
+  "bin": {
+    "axon":     "./dist/index.js",
+    "axon-cli": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build":     "tsup",
+    "dev":       "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "start":     "node dist/index.js",
+    "prepare":   "npm run build",
+    "prepack":   "npm run build"
+  },
+  "keywords": [
+    "axon",
+    "llm",
+    "routing",
+    "cli",
+    "agent",
+    "openai",
+    "anthropic",
+    "byok",
+    "memory",
+    "coding-agent"
+  ],
+  "author": "Nexalyte Tech Solutions",
+  "license": "MIT",
+  "homepage":   "https://github.com/atharva7577/axon-cli#readme",
+  "bugs": {
+    "url": "https://github.com/atharva7577/axon-cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url":  "git+https://github.com/atharva7577/axon-cli.git"
+  },
+  "dependencies": {
+    "chalk":     "^5.4.1",
+    "commander": "^14.0.0",
+    "diff":      "^8.0.2",
+    "ora":       "^8.2.0",
+    "prompts":   "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/diff":    "^8.0.0",
+    "@types/node":    "^25.5.0",
+    "@types/prompts": "^2.4.9",
+    "tsup":           "^8.5.0",
+    "tsx":            "^4.21.0",
+    "typescript":     "^6.0.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
