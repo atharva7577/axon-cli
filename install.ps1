@@ -66,21 +66,42 @@ if ($nodeMajor -lt $MinNodeMajor) {
     return
 }
 
-# --- npm ---------------------------------------------------------------------
-$npmExe = Get-Command npm -ErrorAction SilentlyContinue
-if (-not $npmExe) {
-    Write-Fail 'npm not found in PATH. It usually ships with Node - make sure your install is complete.'
+# --- npm.cmd absolute path ---------------------------------------------------
+# Bare `& npm ...` resolves whatever is in scope -- a profile function, an
+# alias from a posh module, a node-version-manager wrapper -- and any of
+# those wrappers can mangle the argument list. Resolve npm.cmd explicitly
+# via -CommandType Application so we ALWAYS get the underlying executable.
+$npmCmd = $null
+$candidates = @(
+    (Join-Path $env:ProgramFiles 'nodejs\npm.cmd')
+)
+if (${env:ProgramFiles(x86)}) {
+    $candidates += (Join-Path ${env:ProgramFiles(x86)} 'nodejs\npm.cmd')
+}
+foreach ($c in $candidates) {
+    if ($c -and (Test-Path $c)) { $npmCmd = $c; break }
+}
+if (-not $npmCmd) {
+    $cmdInfo = Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue
+    if ($cmdInfo) { $npmCmd = $cmdInfo.Source }
+}
+if (-not $npmCmd) {
+    Write-Fail 'Could not locate npm.cmd. Reinstall Node from https://nodejs.org/ and retry.'
     return
 }
 
 # --- install -----------------------------------------------------------------
 Write-Host "  Installing @axon/cli from github:$Repo ..."
+Write-Host "  Using npm at: $npmCmd"
 Write-Host ''
 # --install-links forces npm to COPY files instead of creating a junction to
 # its temp git-clone dir. Without it, the temp dir gets cleaned up after the
-# install and the global `axon` shim points at a dangling path -- the classic
-# Windows-only failure mode for `npm i -g github:user/repo`.
-& npm install -g "github:$Repo" --install-links
+# install and the global axon shim points at a dangling path -- the classic
+# Windows-only failure mode for: npm i -g github:user/repo.
+# Splat-args passes each token discretely across the PowerShell -> native-cmd
+# boundary so no PS string-parsing quirk can mutate the argv.
+$installArgs = @('install', '-g', "github:$Repo", '--install-links')
+& $npmCmd @installArgs
 $installExit = $LASTEXITCODE
 
 if ($installExit -ne 0) {
@@ -91,7 +112,7 @@ if ($installExit -ne 0) {
 
 # --- post-install PATH sanity ------------------------------------------------
 $prefix = $null
-try { $prefix = (& npm prefix -g).Trim() } catch { $prefix = $null }
+try { $prefix = (& $npmCmd prefix -g).Trim() } catch { $prefix = $null }
 
 $axonOnPath = Get-Command axon -ErrorAction SilentlyContinue
 
