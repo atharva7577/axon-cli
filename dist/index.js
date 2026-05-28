@@ -1597,7 +1597,7 @@ async function runFirstRun() {
 }
 
 // src/index.ts
-var VERSION = "0.0.3";
+var VERSION = "0.0.4";
 var program = new Command();
 program.name("axon").description("AXON \u2014 the terminal client for routing + execution-memory.").version(VERSION, "-v, --version", "Show CLI version.").showHelpAfterError(chalk11.dim("(run `axon --help` for command list)"));
 registerLogin(program);

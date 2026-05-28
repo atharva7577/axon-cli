@@ -40,6 +40,39 @@ to its temp git-clone — without it the install looks like it succeeded but the
 `axon` shim points to a deleted directory. (Once `@axon/cli` is published to
 npm the canonical install becomes `npm i -g @axon/cli` with no extra flags.)
 
+### Troubleshooting
+
+**`axon: command not found` / `not recognized as the name of a cmdlet`**
+
+The `axon` shim was installed into `npm prefix -g`, but that directory isn't
+on your PATH yet. Two common reasons:
+
+1. **You installed Node in this same shell session.** The official Node
+   installer adds `%APPDATA%\npm` (Windows) / `~/.npm-global/bin` (Unix) to
+   PATH, but only for shells started *after* the install. Open a new shell
+   and try `axon --version` again.
+2. **You're using nvm-windows / fnm / scoop.** Each manages global bins
+   differently. Run `npm prefix -g` to see where the shim landed and add
+   that directory (or its `bin/` subdir on Unix) to PATH.
+
+You can also call the shim directly without changing PATH:
+
+```sh
+# Windows
+& "$(npm prefix -g)\axon.cmd" --version
+
+# Unix
+"$(npm prefix -g)/bin/axon" --version
+```
+
+**PowerShell window closes during install**
+
+Fixed in `install.ps1` since v0.0.4. The old script set
+`$ErrorActionPreference = 'Stop'` and called `exit 1` on benign npm stderr,
+which terminates the host shell when run via `iex`. Re-run the one-liner
+with the current `main` script. If it still happens, open an issue with the
+output of `$PSVersionTable.PSVersion` and what's on screen before the close.
+
 ---
 
 ## Quick start

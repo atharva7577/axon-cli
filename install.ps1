@@ -6,68 +6,120 @@
   Usage:
     iwr -useb https://raw.githubusercontent.com/atharva7577/axon-cli/main/install.ps1 | iex
 
-  Detects node + npm, fails cleanly when missing, then installs @axon/cli from
-  the project's GitHub repo into the global npm prefix.
+  Detects node + npm, then installs @axon/cli from the project's GitHub repo
+  into the global npm prefix. After install, verifies the `axon` shim is
+  reachable from PATH and tells the user exactly what to do if it isn't.
 
-  Aborts on any error — strict mode is intentional so a half-installed CLI never
-  silently lingers.
+  This script is designed to be safe when piped through `iex` — it NEVER
+  calls `exit`, because `exit` would terminate the host PowerShell window.
+  Failures `return` instead.
 #>
-$ErrorActionPreference = 'Stop'
 
-$Repo          = 'atharva7577/axon-cli'
-$MinNodeMajor  = 20
+# Intentionally NOT setting $ErrorActionPreference = 'Stop'. On PS 5.1, that
+# promotes npm's benign stderr writes (funding notices, "added N packages")
+# to terminating NativeCommandError records — and combined with `exit 1`
+# would close the user's window.
+$Repo         = 'atharva7577/axon-cli'
+$MinNodeMajor = 20
+$ok = $true
 
-Write-Host ''
-Write-Host '  AXON CLI installer'
-Write-Host ''
-
-function Abort($msg) {
-  Write-Host "  ✗ $msg" -ForegroundColor Red
-  exit 1
+function Write-Banner {
+    Write-Host ''
+    Write-Host '  ==> AXON CLI installer'
+    Write-Host ''
 }
 
-# ─── node ───────────────────────────────────────────────────────────────────
+function Write-Fail($msg) {
+    Write-Host "  [FAIL] $msg" -ForegroundColor Red
+}
+
+function Write-Ok($msg) {
+    Write-Host "  [OK]   $msg" -ForegroundColor Green
+}
+
+function Write-Hint($msg) {
+    Write-Host "  [!]    $msg" -ForegroundColor Yellow
+}
+
+Write-Banner
+
+# --- node --------------------------------------------------------------------
 $nodeExe = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeExe) {
-  Abort @'
-Node.js not found in PATH.
-    Install Node 20+ from https://nodejs.org/ or via winget:
-      winget install OpenJS.NodeJS.LTS
-    Then re-run this installer.
-'@
+    Write-Fail 'Node.js not found in PATH.'
+    Write-Host '         Install Node 20+ from https://nodejs.org/ then re-run this installer.'
+    Write-Host '         Or via winget:  winget install OpenJS.NodeJS.LTS'
+    return
 }
 
+$nodeVersion = $null
 try {
-  $nodeVersion = (& node -v).TrimStart('v')
-  $nodeMajor   = [int]($nodeVersion.Split('.')[0])
+    $nodeVersion = (& node -v).TrimStart('v')
+    $nodeMajor   = [int]($nodeVersion.Split('.')[0])
 } catch {
-  Abort "Could not parse Node version output: $($_.Exception.Message)"
+    Write-Fail "Could not parse node version output: $($_.Exception.Message)"
+    return
 }
 
 if ($nodeMajor -lt $MinNodeMajor) {
-  Abort "Node $nodeVersion found. AXON CLI requires Node $MinNodeMajor or newer."
+    Write-Fail "Node $nodeVersion found. AXON CLI requires Node $MinNodeMajor or newer."
+    return
 }
 
-# ─── npm ────────────────────────────────────────────────────────────────────
+# --- npm ---------------------------------------------------------------------
 $npmExe = Get-Command npm -ErrorAction SilentlyContinue
 if (-not $npmExe) {
-  Abort 'npm not found in PATH. It usually ships with Node — make sure your install is complete.'
+    Write-Fail 'npm not found in PATH. It usually ships with Node - make sure your install is complete.'
+    return
 }
 
-# ─── install ────────────────────────────────────────────────────────────────
-Write-Host "  Installing @axon/cli from github:$Repo…"
+# --- install -----------------------------------------------------------------
+Write-Host "  Installing @axon/cli from github:$Repo ..."
 Write-Host ''
 # --install-links forces npm to COPY files instead of creating a junction to
 # its temp git-clone dir. Without it, the temp dir gets cleaned up after the
-# install and the global `axon` shim points at a dangling path — the classic
+# install and the global `axon` shim points at a dangling path -- the classic
 # Windows-only failure mode for `npm i -g github:user/repo`.
 & npm install -g "github:$Repo" --install-links
-if ($LASTEXITCODE -ne 0) {
-  Abort "npm install failed with exit code $LASTEXITCODE."
+$installExit = $LASTEXITCODE
+
+if ($installExit -ne 0) {
+    Write-Fail "npm install exited with code $installExit."
+    Write-Host '         Look in the most recent log under %LOCALAPPDATA%\npm-cache\_logs for the cause.'
+    return
 }
 
-# ─── done ───────────────────────────────────────────────────────────────────
+# --- post-install PATH sanity ------------------------------------------------
+$prefix = $null
+try { $prefix = (& npm prefix -g).Trim() } catch { $prefix = $null }
+
+$axonOnPath = Get-Command axon -ErrorAction SilentlyContinue
+
+if ($axonOnPath) {
+    Write-Host ''
+    Write-Ok "@axon/cli installed and ready. Run 'axon' to start."
+    Write-Host '         First-run wizard will appear when no API key is on file.'
+    Write-Host ''
+    return
+}
+
+# axon not on PATH yet — figure out why and tell the user precisely what to do.
+$shimPath = if ($prefix) { Join-Path $prefix 'axon.cmd' } else { $null }
+$shimExists = $shimPath -and (Test-Path $shimPath)
+
 Write-Host ''
-Write-Host '  ✓ Done. Run `axon` to get started.' -ForegroundColor Green
-Write-Host '    First-run wizard will appear when no API key is on file.'
-Write-Host ''
+if ($shimExists) {
+    Write-Ok "@axon/cli installed at: $prefix"
+    Write-Hint "Open a NEW PowerShell window to use it."
+    Write-Host '         The official Node installer adds this directory to PATH, but only for'
+    Write-Host '         shells started AFTER the install. Your current shell still has the old PATH.'
+    Write-Host ''
+    Write-Host '         Or run it directly from this shell:'
+    Write-Host "             & '$shimPath' --version"
+    Write-Host ''
+} else {
+    Write-Fail "npm reported success but no axon shim was found at expected prefix: $prefix"
+    Write-Host '         Open an issue with the output above and the contents of'
+    Write-Host '         %LOCALAPPDATA%\npm-cache\_logs (latest *-debug-0.log).'
+    Write-Host ''
+}
