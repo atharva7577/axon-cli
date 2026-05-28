@@ -17,6 +17,8 @@ import { Command } from "commander";
 import { readConfig } from "../config.js";
 import { streamChat, type SseFinalChunk } from "../sse.js";
 import { AxonBackendError } from "../http.js";
+import { runAgentTurn, type ChatMessage } from "../agent.js";
+import { PermissionStore } from "../permissions.js";
 
 interface ChatOpts {
   model?:          string;
@@ -26,7 +28,17 @@ interface ChatOpts {
   json?:           boolean;
   meta?:           boolean; // commander's --no-meta sets this to false
   mode?:           "auto" | "coding" | "chat";
+  agent?:          boolean; // --agent enables tool-use loop
+  maxTurns?:       number;
 }
+
+const AGENT_SYSTEM_PROMPT = [
+  "You are AXON in one-shot agent mode. The user gave a single prompt and",
+  "you have tools (read_file, glob, grep, ls, bash, write_file, edit_file,",
+  "web_fetch) to do real work on their machine. Bash/write_file/edit_file/",
+  "web_fetch ask for permission before running. Be concise; finish the task",
+  "and stop.",
+].join(" ");
 
 /**
  * Read stdin if data is being piped in. Race-based detection because
@@ -130,6 +142,36 @@ async function runChat(promptArg: string, opts: ChatOpts): Promise<void> {
     return;
   }
 
+  // --agent: route through the multi-turn tool loop instead of the simple stream.
+  if (opts.agent) {
+    const messages: ChatMessage[] = [
+      { role: "system", content: AGENT_SYSTEM_PROMPT },
+      { role: "user",   content: prompt },
+    ];
+    const ctl = new AbortController();
+    const onSignal = () => ctl.abort(new Error("user cancelled"));
+    process.on("SIGINT", onSignal);
+    try {
+      await runAgentTurn(messages, new PermissionStore(), {
+        apiBase:  cfg.apiBase,
+        apiKey:   cfg.apiKey,
+        model:    opts.model ?? cfg.defaultModel ?? "auto",
+        mode:     opts.mode ?? "coding",
+        byok: {
+          openai:    opts.byokOpenaiKey,
+          anthropic: opts.byokAnthropicKey,
+          google:    opts.byokGoogleKey,
+        },
+        signal:   ctl.signal,
+        maxTurns: opts.maxTurns ?? 25,
+        showMeta: opts.meta !== false,
+      });
+    } finally {
+      process.off("SIGINT", onSignal);
+    }
+    return;
+  }
+
   const body = {
     model:    opts.model ?? cfg.defaultModel ?? "auto",
     messages: [{ role: "user", content: prompt }],
@@ -217,6 +259,8 @@ export function registerChat(program: Command): void {
     .option("--byok-google-key <key>",      "Forward a Google key (header x-google-key).")
     .option("--json",                       "Emit a single JSON blob instead of streaming text.")
     .option("--no-meta",                    "Suppress the routing trace line after the response.")
+    .option("--agent",                      "Run as an agent: model can call tools (read/glob/grep/ls/bash/write/edit/web_fetch) to do real work. Adds turn-by-turn permission prompts for mutating tools.")
+    .option("--max-turns <n>",              "When --agent: cap LLM round-trips (default 25).", (v: string) => parseInt(v, 10))
     .action(async (promptParts: string[], opts: ChatOpts) => {
       await runChat(promptParts.join(" "), opts);
     });

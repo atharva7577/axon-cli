@@ -32,10 +32,23 @@ export interface SseFinalChunk {
   [key: string]: unknown;
 }
 
+/**
+ * One slice of a streamed tool_call. OpenAI emits these index-keyed across
+ * many chunks: the `id` + `name` arrive in the first slice for that index;
+ * `argumentsDelta` accumulates over subsequent slices until finish_reason.
+ */
+export interface SseToolCallDelta {
+  index:           number;
+  id?:             string;
+  name?:           string;
+  argumentsDelta?: string;
+}
+
 export type SseEvent =
-  | { type: "delta"; text: string }
-  | { type: "done";  final: SseFinalChunk }
-  | { type: "chunk"; raw:   Record<string, unknown> };
+  | { type: "delta";           text:  string }
+  | { type: "tool_call_delta"; delta: SseToolCallDelta }
+  | { type: "done";             final: SseFinalChunk }
+  | { type: "chunk";            raw:   Record<string, unknown> };
 
 export interface SseRequestOptions {
   apiBase:   string;
@@ -150,10 +163,34 @@ export async function* streamChat(
         lastChunk = parsed as SseFinalChunk;
         yield { type: "chunk", raw: parsed };
 
-        const choice = (parsed.choices as Array<{ delta?: { content?: string } }> | undefined)?.[0];
-        const delta  = choice?.delta?.content;
+        const choice = (parsed.choices as Array<{
+          delta?: {
+            content?:    string;
+            tool_calls?: Array<{
+              index:    number;
+              id?:      string;
+              type?:    string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+        }> | undefined)?.[0];
+        const delta = choice?.delta?.content;
         if (typeof delta === "string" && delta.length > 0) {
           yield { type: "delta", text: delta };
+        }
+        const toolDeltas = choice?.delta?.tool_calls;
+        if (Array.isArray(toolDeltas)) {
+          for (const td of toolDeltas) {
+            yield {
+              type: "tool_call_delta",
+              delta: {
+                index:          td.index,
+                id:             td.id,
+                name:           td.function?.name,
+                argumentsDelta: td.function?.arguments,
+              },
+            };
+          }
         }
       }
     }

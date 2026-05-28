@@ -13,32 +13,34 @@
  */
 
 import { createInterface, type Interface } from "node:readline";
-import { randomUUID } from "node:crypto";
 import chalk from "chalk";
 import { readConfig } from "./config.js";
-import { streamChat, type SseFinalChunk } from "./sse.js";
-import { AxonBackendError } from "./http.js";
-import {
-  AttachedFiles,
-  buildPromptWithAttachments,
-  type ChatContext,
-} from "./context.js";
+import { AttachedFiles, buildPromptWithAttachments } from "./context.js";
 import { DEFAULT_SESSION_MODE, isSessionMode, type SessionMode } from "./mode.js";
 import { PendingEditState } from "./pending.js";
 import {
   applyCodeEdit,
-  parseCodeEdit,
   revertAppliedEdit,
-  validateSearchReplace,
-  type CodeEditPayload,
 } from "./diff.js";
-import { renderSearchReplace, renderUnifiedDiff } from "./render.js";
 import { postEditorEvent } from "./telemetry.js";
+import { PermissionStore } from "./permissions.js";
+import { runAgentTurn, type ChatMessage } from "./agent.js";
+
+const SYSTEM_PROMPT = [
+  "You are AXON, a terminal-native coding assistant running on the user's machine.",
+  "You have full filesystem access via tools: read_file, glob, grep, ls, bash, write_file,",
+  "edit_file, web_fetch. Bash/write_file/edit_file/web_fetch require user permission per call.",
+  "Always prefer the read-only tools when you only need to look around. Read the relevant",
+  "files BEFORE you answer questions about the codebase — never refuse with \"I can't access",
+  "files\" because you absolutely can. Be concise and direct.",
+].join(" ");
 
 interface ReplState {
   attached:  AttachedFiles;
   mode:      SessionMode;
   pending:   PendingEditState;
+  messages:  ChatMessage[];
+  perms:     PermissionStore;
 }
 
 function banner(state: ReplState): void {
@@ -51,42 +53,24 @@ function banner(state: ReplState): void {
 function helpText(): string {
   return [
     "",
-    chalk.bold("commands"),
+    chalk.bold("how to use"),
+    `  Just type. The model has tools to read files, glob, grep, ls, run`,
+    `  shell commands, write/edit files, and fetch URLs. Mutating tools`,
+    `  (bash / write / edit / web_fetch) ask for permission per call.`,
+    "",
+    chalk.bold("slash commands"),
     `  ${chalk.cyan("/file <path>")}        attach a file (counts toward 32k context cap)`,
     `  ${chalk.cyan("/files <p1> <p2>")}    attach multiple files`,
-    `  ${chalk.cyan("/clear")}              detach all files + drop pending edit`,
-    `  ${chalk.cyan("/status")}             attached files, mode, pending edit`,
+    `  ${chalk.cyan("/clear")}              detach files + reset conversation + drop pending edit`,
+    `  ${chalk.cyan("/status")}             attached files, mode, pending edit, turn count`,
     `  ${chalk.cyan("/mode <auto|coding|chat>")}  toggle session mode`,
-    `  ${chalk.cyan("/diff")}               re-show the current pending diff`,
-    `  ${chalk.cyan("/apply")} or ${chalk.cyan("a")}        apply the pending edit (fires edit_accepted)`,
-    `  ${chalk.cyan("/reject")} or ${chalk.cyan("r")}       reject the pending edit (fires edit_rejected)`,
+    `  ${chalk.cyan("/apply")} or ${chalk.cyan("a")}        apply a legacy pending edit (M2 code_edit path)`,
+    `  ${chalk.cyan("/reject")} or ${chalk.cyan("r")}       reject the pending edit`,
     `  ${chalk.cyan("/undo")}               revert the last applied edit`,
     `  ${chalk.cyan("/help")}               this list`,
     `  ${chalk.cyan("/exit")} or ${chalk.cyan("Ctrl-D")}   leave the REPL`,
     "",
   ].join("\n");
-}
-
-function formatMetaLine(final: SseFinalChunk): string | null {
-  const meta = (final.meta ?? {}) as Record<string, unknown>;
-  const model = (typeof final.model === "string" && final.model) || (meta.model as string | undefined);
-  if (!model) return null;
-  const reasons: string[] = [];
-  if (meta.fastPath)  reasons.push(`fast-path ${meta.fastPath}`);
-  if (meta.routing)   reasons.push(meta.routing as string);
-  else if (meta.intent) reasons.push(`intent ${meta.intent}`);
-  const tail: string[] = [];
-  if (typeof meta.cost         === "number") tail.push(`$${(meta.cost         as number).toFixed(4)} spent`);
-  if (typeof meta.creditsSaved === "number") tail.push(`$${(meta.creditsSaved as number).toFixed(4)} saved`);
-  const head = reasons.length > 0 ? `routed ${model} via ${reasons.join(", ")}` : `routed ${model}`;
-  return tail.length > 0 ? `${head} (${tail.join(", ")})` : head;
-}
-
-function getRequestIdFromFinal(final: SseFinalChunk): string {
-  const meta = (final.meta ?? {}) as Record<string, unknown>;
-  const id = meta.requestId;
-  if (typeof id === "string" && id.length > 0) return id;
-  return randomUUID();
 }
 
 async function runTurn(state: ReplState, userPrompt: string): Promise<void> {
@@ -96,82 +80,37 @@ async function runTurn(state: ReplState, userPrompt: string): Promise<void> {
     return;
   }
 
-  const prompt = buildPromptWithAttachments(userPrompt, state.attached);
-  const ctx: ChatContext | undefined = state.attached.toBackendContext();
-
-  const body: Record<string, unknown> = {
-    model:    cfg.defaultModel ?? "auto",
-    messages: [{ role: "user", content: prompt }],
-    stream:   true,
-    mode:     state.mode,
-  };
-  if (ctx) body.context = ctx;
+  // Seed the system prompt on the first turn.
+  if (state.messages.length === 0) {
+    state.messages.push({ role: "system", content: SYSTEM_PROMPT });
+  }
+  state.messages.push({
+    role:    "user",
+    content: buildPromptWithAttachments(userPrompt, state.attached),
+  });
 
   const ctl = new AbortController();
   const onSig = () => ctl.abort(new Error("user cancelled"));
   process.on("SIGINT", onSig);
 
-  let final: SseFinalChunk | null = null;
   try {
-    for await (const ev of streamChat(body, { apiBase: cfg.apiBase, apiKey: cfg.apiKey, signal: ctl.signal })) {
-      if (ev.type === "delta") process.stdout.write(ev.text);
-      else if (ev.type === "done") final = ev.final;
-    }
-  } catch (err) {
+    await runAgentTurn(state.messages, state.perms, {
+      apiBase:  cfg.apiBase,
+      apiKey:   cfg.apiKey,
+      model:    cfg.defaultModel ?? "auto",
+      mode:     state.mode,
+      signal:   ctl.signal,
+      maxTurns: 25,
+      showMeta: true,
+    });
+  } finally {
     process.off("SIGINT", onSig);
-    if (err instanceof AxonBackendError) {
-      if (err.status === 401) {
-        console.error("\n" + chalk.red("✗ Invalid or revoked key.") + " Run " + chalk.bold("axon login") + " to refresh.");
-      } else {
-        console.error("\n" + chalk.red(`✗ ${err.message}`) + chalk.dim(`  (${err.code})`));
-      }
-    } else {
-      console.error("\n" + chalk.red(`✗ ${(err as Error).message ?? err}`));
-    }
-    return;
-  }
-  process.off("SIGINT", onSig);
-  process.stdout.write("\n");
-
-  if (final) {
-    const line = formatMetaLine(final);
-    if (line) console.log(chalk.dim(`> ${line}`));
-  }
-
-  // Detect a code_edit on the final chunk. The buffered shim hangs the AXON
-  // extras on the final SSE chunk; the search-replace payload lives there.
-  if (final?.code_edit) {
-    const payload = parseCodeEdit({ type: "code_edit", ...(final.code_edit as Record<string, unknown>) });
-    if (payload) {
-      await handleProposedEdit(state, payload, getRequestIdFromFinal(final));
-    }
   }
 }
 
-async function handleProposedEdit(state: ReplState, payload: CodeEditPayload, requestId: string): Promise<void> {
-  // Pre-validate search-replace placeholders before showing the user a diff
-  // we couldn't apply anyway.
-  if (!("newContent" in payload)) {
-    const v = validateSearchReplace(payload);
-    if (!v.valid) {
-      console.log(chalk.yellow(`\n(model returned an invalid edit: ${v.reason})`));
-      return;
-    }
-  }
-
-  state.pending.setPending({ payload, requestId, proposedAt: Date.now() });
-  await postEditorEvent({ event: "edit_proposed", requestId, filePath: payload.filePath });
-
-  console.log("");
-  if ("newContent" in payload) {
-    console.log(chalk.bold.cyan(`──── ${payload.filePath} (full-file write) ────`));
-    console.log(chalk.dim(`(${payload.newContent.length} chars)`));
-  } else {
-    console.log(renderSearchReplace(payload.filePath, payload.search, payload.replace));
-  }
-  console.log(chalk.dim("\n[a]pply / [r]eject / [e]dit  — or send another prompt to refine"));
-}
-
+// Kept as an explicit /apply path for the legacy code_edit flow; the agent
+// loop's edit_file tool handles this end-to-end now, but the slash command
+// stays for users who set up a pending edit via the old path.
 async function cmdApply(state: ReplState): Promise<void> {
   const p = state.pending.getPending();
   if (!p) { console.log(chalk.dim("(nothing pending)")); return; }
@@ -212,29 +151,13 @@ async function cmdUndo(state: ReplState): Promise<void> {
   }
 }
 
-function cmdDiff(state: ReplState): void {
-  const p = state.pending.getPending();
-  if (!p) { console.log(chalk.dim("(nothing pending)")); return; }
-  if ("newContent" in p.payload) {
-    console.log(chalk.bold.cyan(`──── ${p.payload.filePath} (full-file write) ────`));
-    console.log(chalk.dim(`(${p.payload.newContent.length} chars)`));
-  } else {
-    // Render a true unified diff against the on-disk content if available.
-    try {
-      const onDisk = state.attached.list().find((a) => a.path.endsWith(p.payload.filePath))?.content;
-      if (onDisk) {
-        console.log(renderUnifiedDiff(onDisk, onDisk.replace(p.payload.search, p.payload.replace), { filePath: p.payload.filePath }));
-        return;
-      }
-    } catch { /* fall through */ }
-    console.log(renderSearchReplace(p.payload.filePath, p.payload.search, p.payload.replace));
-  }
-}
-
 function cmdStatus(state: ReplState): void {
+  // System message doesn't count as a "turn" — subtract it when present.
+  const turnCount = Math.max(0, state.messages.filter((m) => m.role !== "system").length);
   console.log("");
   console.log(`  ${chalk.dim("mode:")}      ${state.mode}`);
   console.log(`  ${chalk.dim("cwd:")}       ${state.attached.workspaceRoot}`);
+  console.log(`  ${chalk.dim("turns:")}     ${turnCount} message${turnCount === 1 ? "" : "s"} in history`);
   console.log(`  ${chalk.dim("attached:")}  ${state.attached.size()} file${state.attached.size() === 1 ? "" : "s"}`);
   for (const f of state.attached.list()) {
     console.log(`    · ${f.relPath} ${chalk.dim(`(${f.bytes}B)`)}`);
@@ -290,7 +213,8 @@ async function dispatch(state: ReplState, line: string): Promise<{ exit: boolean
     case "clear":
       state.attached.clear();
       state.pending.clearPending();
-      console.log(chalk.dim("(cleared attachments + pending)"));
+      state.messages.length = 0;
+      console.log(chalk.dim("(cleared attachments + conversation + pending)"));
       return { exit: false };
 
     case "mode": {
@@ -330,10 +254,6 @@ async function dispatch(state: ReplState, line: string): Promise<{ exit: boolean
       return { exit: false };
     }
 
-    case "diff":
-      cmdDiff(state);
-      return { exit: false };
-
     case "apply":
       await cmdApply(state);
       return { exit: false };
@@ -362,6 +282,8 @@ export async function runRepl(): Promise<void> {
     attached: new AttachedFiles(process.cwd()),
     mode:     DEFAULT_SESSION_MODE,
     pending:  new PendingEditState(),
+    messages: [],
+    perms:    new PermissionStore(),
   };
   banner(state);
 
