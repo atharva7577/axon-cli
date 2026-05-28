@@ -6,7 +6,9 @@ yarn-error.log*
 pnpm-debug.log*
 
 # ─── Build output ───────────────────────────────────────────────────────────
-dist/
+# dist/ IS committed so `npm i -g github:atharva7577/axon-cli` works without
+# devDependencies — the tsup build only runs locally + on `npm publish` via
+# the `prepack` script.
 *.tsbuildinfo
 
 # ─── Secrets / local config ────────────────────────────────────────────────
