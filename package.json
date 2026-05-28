@@ -7,12 +7,6 @@
     "axon":     "./dist/index.js",
     "axon-cli": "./dist/index.js"
   },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE",
-    "CHANGELOG.md"
-  ],
   "scripts": {
     "build":           "tsup",
     "dev":             "tsx src/index.ts",
