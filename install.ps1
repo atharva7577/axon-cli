@@ -124,16 +124,58 @@ if ($axonOnPath) {
     return
 }
 
-# axon not on PATH yet — figure out why and tell the user precisely what to do.
+# axon not on PATH yet — patch both the current session and User PATH so it
+# works immediately AND survives a shell restart. Friction-free install is
+# the point: telling the user to "open a new shell" was working but ugly.
 $shimPath = if ($prefix) { Join-Path $prefix 'axon.cmd' } else { $null }
 $shimExists = $shimPath -and (Test-Path $shimPath)
 
+$pathAdded = $false
+if ($shimExists) {
+    # 1. Patch the live $env:PATH so `axon` resolves in THIS shell.
+    if ($env:PATH -notlike "*$prefix*") {
+        $env:PATH = "$prefix;$env:PATH"
+    }
+
+    # 2. Persist to the User PATH registry value so future shells inherit it.
+    #    Wrapped in try/catch -- SetEnvironmentVariable can fail under locked-
+    #    down corporate group-policy. Not fatal; session PATH still gets axon.
+    try {
+        $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+        $segments = if ($userPath) { ($userPath -split ';' | Where-Object { $_ }) } else { @() }
+        $hasPrefix = $segments | Where-Object { $_.TrimEnd('\') -ieq $prefix.TrimEnd('\') }
+        if (-not $hasPrefix) {
+            $newUserPath = if ($userPath) { "$userPath;$prefix" } else { $prefix }
+            [Environment]::SetEnvironmentVariable('PATH', $newUserPath, 'User')
+            $pathAdded = $true
+        }
+    } catch {
+        # ignore -- session PATH patch above is the immediate win
+    }
+}
+
+# Re-check after the patch.
+$axonOnPath = Get-Command axon -ErrorAction SilentlyContinue
+
 Write-Host ''
+if ($axonOnPath) {
+    Write-Ok "@axon/cli installed and ready. Run 'axon' to start."
+    Write-Host '         First-run wizard will appear when no API key is on file.'
+    if ($pathAdded) {
+        Write-Host ''
+        Write-Host "         (Added $prefix to your User PATH so future shells see it too.)"
+    }
+    Write-Host ''
+    return
+}
+
+# Patch didn't take (rare: corporate PATH lockdown, virus scanner blocked the
+# shim, etc.). Fall back to the explicit hint so the user can still use it.
 if ($shimExists) {
     Write-Ok "@axon/cli installed at: $prefix"
     Write-Hint "Open a NEW PowerShell window to use it."
-    Write-Host '         The official Node installer adds this directory to PATH, but only for'
-    Write-Host '         shells started AFTER the install. Your current shell still has the old PATH.'
+    Write-Host '         The PATH update for this shell did not take effect -- likely a corporate'
+    Write-Host '         policy or a startup script reset PATH after we patched it.'
     Write-Host ''
     Write-Host '         Or run it directly from this shell:'
     Write-Host "             & '$shimPath' --version"

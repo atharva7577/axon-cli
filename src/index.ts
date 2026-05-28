@@ -27,7 +27,7 @@ import { runFirstRun, shouldRunFirstRun } from "./onboarding.js";
 import { runRepl } from "./repl.js";
 import { readConfig } from "./config.js";
 
-const VERSION = "0.0.5";
+const VERSION = "0.0.6";
 
 const program = new Command();
 
