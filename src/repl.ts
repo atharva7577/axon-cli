@@ -25,6 +25,7 @@ import {
 import { postEditorEvent } from "./telemetry.js";
 import { PermissionStore } from "./permissions.js";
 import { runAgentTurn, type ChatMessage } from "./agent.js";
+import { resolveMemory, withMemory, memoryBannerLine, type ResolvedMemory } from "./axonmd.js";
 
 const SYSTEM_PROMPT = [
   "You are AXON, a terminal-native coding assistant running on the user's machine.",
@@ -41,12 +42,16 @@ interface ReplState {
   pending:   PendingEditState;
   messages:  ChatMessage[];
   perms:     PermissionStore;
+  /** AXON.md hierarchy, resolved once at session start. */
+  memory:    ResolvedMemory;
 }
 
 function banner(state: ReplState): void {
   console.log("");
   console.log("  " + chalk.bold("AXON") + chalk.dim("  ·  /help for commands, /exit to leave"));
   console.log("  " + chalk.dim(`mode: ${state.mode}  ·  cwd: ${state.attached.workspaceRoot}`));
+  const mem = memoryBannerLine(state.memory);
+  if (mem) console.log("  " + chalk.dim(`memory: ${mem}`));
   console.log("");
 }
 
@@ -63,6 +68,7 @@ function helpText(): string {
     `  ${chalk.cyan("/files <p1> <p2>")}    attach multiple files`,
     `  ${chalk.cyan("/clear")}              detach files + reset conversation + drop pending edit`,
     `  ${chalk.cyan("/status")}             attached files, mode, pending edit, turn count`,
+    `  ${chalk.cyan("/memory")}             list resolved AXON.md memory (re-reads from disk)`,
     `  ${chalk.cyan("/mode <auto|coding|chat>")}  toggle session mode`,
     `  ${chalk.cyan("/apply")} or ${chalk.cyan("a")}        apply a legacy pending edit (M2 code_edit path)`,
     `  ${chalk.cyan("/reject")} or ${chalk.cyan("r")}       reject the pending edit`,
@@ -80,9 +86,9 @@ async function runTurn(state: ReplState, userPrompt: string): Promise<void> {
     return;
   }
 
-  // Seed the system prompt on the first turn.
+  // Seed the system prompt (+ AXON.md memory) on the first turn.
   if (state.messages.length === 0) {
-    state.messages.push({ role: "system", content: SYSTEM_PROMPT });
+    state.messages.push({ role: "system", content: withMemory(SYSTEM_PROMPT, state.memory) });
   }
   state.messages.push({
     role:    "user",
@@ -171,6 +177,25 @@ function cmdStatus(state: ReplState): void {
   }
   const la = state.pending.getLastApplied();
   if (la) console.log(`  ${chalk.dim("undoable:")}  ${la.applied.filePath}`);
+  const mem = memoryBannerLine(state.memory);
+  console.log(`  ${chalk.dim("memory:")}    ${mem ?? chalk.dim("(none)")}`);
+  console.log("");
+}
+
+/** Re-resolve the AXON.md hierarchy and list the sources (picks up mid-session edits). */
+function cmdMemory(state: ReplState): void {
+  state.memory = resolveMemory(state.attached.workspaceRoot);
+  console.log("");
+  if (state.memory.sources.length === 0) {
+    console.log(chalk.dim("  no AXON.md / CLAUDE.md found in ~/.axon or the cwd hierarchy"));
+  } else {
+    console.log(`  ${chalk.dim("AXON.md memory (root-most first; later files win):")}`);
+    for (const s of state.memory.sources) {
+      console.log(`    · ${s.relLabel} ${chalk.dim(`(${s.bytes}B, ${s.scope})`)}`);
+    }
+    if (state.memory.truncated) console.log(chalk.yellow("  (truncated to fit the context budget)"));
+  }
+  console.log(chalk.dim("  re-applied to the next conversation (run /clear to reseed now)"));
   console.log("");
 }
 
@@ -208,6 +233,11 @@ async function dispatch(state: ReplState, line: string): Promise<{ exit: boolean
 
     case "status":
       cmdStatus(state);
+      return { exit: false };
+
+    case "memory":
+    case "mem":
+      cmdMemory(state);
       return { exit: false };
 
     case "clear":
@@ -278,12 +308,14 @@ function prompt(rl: Interface): void {
 }
 
 export async function runRepl(): Promise<void> {
+  const cwd = process.cwd();
   const state: ReplState = {
-    attached: new AttachedFiles(process.cwd()),
+    attached: new AttachedFiles(cwd),
     mode:     DEFAULT_SESSION_MODE,
     pending:  new PendingEditState(),
     messages: [],
     perms:    new PermissionStore(),
+    memory:   resolveMemory(cwd),
   };
   banner(state);
 

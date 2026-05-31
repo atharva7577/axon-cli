@@ -123,6 +123,7 @@ CLI-scoped API key for your tenant. Total time: ~20 seconds.
 | `axon chat … --byok-{openai,anthropic,google}-key <key>` | Forward `x-<provider>-key` |
 | `axon chat … --json` | Single JSON blob (content, model, usage, meta, code_edit) |
 | `axon chat … --no-meta` | Suppress the routing trace line |
+| `axon chat … --agent` | Run the prompt through the agentic tool loop (built-in tools) instead of a plain stream |
 | `axon repl` | Explicit entry to the REPL (also: bare `axon`) |
 | `axon config get \| set \| list \| path` | Manage `~/.axon/config.json` |
 
@@ -134,8 +135,9 @@ After `axon` opens the REPL:
 | --- | --- |
 | `/file <path>` | Attach a file to the next request (counts toward the 32 k char cap) |
 | `/files <p1> <p2> …` | Attach multiple files |
-| `/clear` | Drop attachments and any pending edit |
-| `/status` | Mode, cwd, attached files, pending edit, undoable |
+| `/clear` | Detach files, reset the conversation, and drop any pending edit |
+| `/status` | Mode, cwd, attached files, pending edit, undoable, loaded memory |
+| `/memory` or `/mem` | List the resolved `AXON.md` memory (re-reads from disk) |
 | `/mode <auto\|coding\|chat>` | Toggle session mode |
 | `/diff` | Re-show the pending diff |
 | `/apply` or `a` | Apply the pending edit (fires `edit_accepted`) |
@@ -148,6 +150,22 @@ When the backend returns a `code_edit`, the CLI renders the diff in
 red/green and waits for your `[a/r/e]`. The accept/reject signal feeds
 your tenant's routing memory — the same prompt next time may take a
 different path because *you* taught the gateway which model gets it right.
+
+### Built-in tools (agent mode)
+
+Bare `axon` (the REPL) and `axon chat … --agent` run as a true agent: the model
+can call eight built-in tools to do real work on your machine.
+
+| Tool | Access | Gating |
+| --- | --- | --- |
+| `read_file`, `glob`, `grep`, `ls` | read-only | run silently |
+| `bash` | run a shell command | prompts per call · *always allow* by `argv[0]` |
+| `write_file`, `edit_file` | create / modify files | prompts per call · *always allow* by top-level dir |
+| `web_fetch` | fetch a URL | prompts per call · *always allow* by hostname |
+
+The loop runs up to 25 turns — streaming content, dispatching each tool call,
+feeding the result back — until the model stops calling. On a non-TTY (CI,
+pipes) every mutating tool auto-denies, so scripted runs stay safe.
 
 ---
 
@@ -175,6 +193,27 @@ axon config set telemetry off
 
 ---
 
+## Project memory (`AXON.md`)
+
+The agent reads persistent project memory at session start and injects it into
+its system prompt — the terminal analogue of a project instructions file.
+
+Resolution order (root-most first; the most specific file wins on conflict):
+
+1. `~/.axon/AXON.md` — global, user-wide
+2. each directory from the git root down to your cwd — `AXON.md`, falling back
+   to `CLAUDE.md` so a Claude Code project's memory file is honoured unchanged
+
+All sources are concatenated under a 16 k-char budget; over budget, the global
+and root-most files are dropped first. The REPL banner and `/status` show
+what's loaded; `/memory` (`/mem`) re-reads from disk and lists the active
+sources.
+
+> Plain `axon chat "…"` (without `--agent`) stays user-only — no memory is
+> injected — so a one-shot stream's routing and cost are unchanged.
+
+---
+
 ## Telemetry
 
 AXON learns from your accept/reject decisions to route your future requests.
@@ -196,7 +235,8 @@ The CLI ships under the same milestone plan as the AXON backend:
 | **M0** — auth + first backend call (`login` / `whoami` / `logout` / `stats` / `config`) | ✅ shipped (v0.0.1) |
 | **M1** — `chat` + Unix pipe + BYOK + routing trace + first-run wizard | ✅ shipped (v0.0.2) |
 | **M2** — REPL + colourised diff + closed-loop `editor_events` | ✅ shipped (v0.0.3) |
-| **M3** — `AXON.md` memory hierarchy + `axon mcp serve` + Claude Code-compatible `SKILL.md` | next |
+| **Agentic REPL** — eight built-in tools (read/glob/grep/ls/bash/write/edit/web_fetch) + multi-turn tool loop | ✅ shipped (v0.0.7) |
+| **M3** — `AXON.md` memory hierarchy ✅ (v0.0.8) · `axon mcp serve` + Claude Code-compatible `SKILL.md` | 🚧 in progress |
 | **M4** — `/route` reasoning, `axon compare`, `axon stats --by …` | planned |
 | **M5** — `axon admin …`, `axon execute` project builder | planned |
 

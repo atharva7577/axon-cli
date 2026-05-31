@@ -1627,6 +1627,101 @@ var PermissionStore = class {
   }
 };
 
+// src/axonmd.ts
+import { existsSync as existsSync3, readFileSync as readFileSync2, statSync } from "fs";
+import { dirname as dirname3, join as join2, relative as relative3 } from "path";
+var MAX_MEMORY_CHARS = 16e3;
+var MAX_WALK_DEPTH = 25;
+var PROJECT_FILENAMES = ["AXON.md", "CLAUDE.md"];
+function tryReadFile(path) {
+  try {
+    if (!existsSync3(path)) return null;
+    if (!statSync(path).isFile()) return null;
+    return readFileSync2(path, "utf-8");
+  } catch {
+    return null;
+  }
+}
+function resolveMemory(cwd = process.cwd()) {
+  const sources = [];
+  const globalPath = join2(configDir(), "AXON.md");
+  const globalContent = tryReadFile(globalPath);
+  if (globalContent && globalContent.trim().length > 0) {
+    sources.push({
+      path: globalPath,
+      scope: "global",
+      relLabel: "~/.axon/AXON.md",
+      content: globalContent,
+      bytes: Buffer.byteLength(globalContent, "utf-8")
+    });
+  }
+  const chain = [];
+  let dir = cwd;
+  for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
+    for (const name of PROJECT_FILENAMES) {
+      const p = join2(dir, name);
+      const content = tryReadFile(p);
+      if (content && content.trim().length > 0) {
+        chain.push({
+          path: p,
+          scope: "project",
+          relLabel: relative3(cwd, p) || name,
+          content,
+          bytes: Buffer.byteLength(content, "utf-8")
+        });
+        break;
+      }
+    }
+    const isGitRoot = existsSync3(join2(dir, ".git"));
+    const parent = dirname3(dir);
+    if (isGitRoot || parent === dir) break;
+    dir = parent;
+  }
+  chain.reverse();
+  sources.push(...chain);
+  return budgetTrim(sources);
+}
+function budgetTrim(sources) {
+  if (sources.length === 0) return { sources: [], block: "", truncated: false };
+  const kept = [...sources];
+  let total = kept.reduce((n, s) => n + s.content.length, 0);
+  let truncated = false;
+  while (kept.length > 1 && total > MAX_MEMORY_CHARS) {
+    const dropped = kept.shift();
+    total -= dropped.content.length;
+    truncated = true;
+  }
+  if (kept.length === 1 && kept[0].content.length > MAX_MEMORY_CHARS) {
+    kept[0] = { ...kept[0], content: kept[0].content.slice(0, MAX_MEMORY_CHARS) + "\n\u2026(truncated)" };
+    truncated = true;
+  }
+  return { sources: kept, block: buildBlock(kept), truncated };
+}
+function buildBlock(sources) {
+  if (sources.length === 0) return "";
+  const parts = [
+    "# Project memory (AXON.md)",
+    "The following are persistent project/user memory files for this workspace. Treat them as authoritative instructions and context. When two files conflict, the later (more specific) one wins."
+  ];
+  for (const s of sources) {
+    parts.push("", `## ${s.relLabel}`, s.content.trim());
+  }
+  return parts.join("\n");
+}
+function withMemory(baseSystemPrompt, mem) {
+  if (!mem.block) return baseSystemPrompt;
+  return `${baseSystemPrompt}
+
+${mem.block}`;
+}
+function memoryBannerLine(mem) {
+  if (mem.sources.length === 0) return null;
+  const labels = mem.sources.map((s) => s.relLabel).join(", ");
+  const suffix = mem.truncated ? " (truncated)" : "";
+  const n = mem.sources.length;
+  return `${n} file${n === 1 ? "" : "s"} \u2014 ${labels}${suffix}`;
+}
+
 // src/commands/chat.ts
 var AGENT_SYSTEM_PROMPT = [
   "You are AXON in one-shot agent mode. The user gave a single prompt and",
@@ -1723,8 +1818,9 @@ async function runChat(promptArg, opts) {
     return;
   }
   if (opts.agent) {
+    const memory = resolveMemory();
     const messages = [
-      { role: "system", content: AGENT_SYSTEM_PROMPT },
+      { role: "system", content: withMemory(AGENT_SYSTEM_PROMPT, memory) },
       { role: "user", content: prompt2 }
     ];
     const ctl2 = new AbortController();
@@ -1837,7 +1933,7 @@ import chalk11 from "chalk";
 
 // src/context.ts
 import { promises as fs6 } from "fs";
-import { basename, isAbsolute as isAbsolute8, relative as relative3, resolve as resolve8 } from "path";
+import { basename, isAbsolute as isAbsolute8, relative as relative4, resolve as resolve8 } from "path";
 var MAX_CONTEXT_CHARS = 32e3;
 function totalChars(files) {
   let n = 0;
@@ -1882,7 +1978,7 @@ var AttachedFiles = class {
     }
     const file = {
       path: abs,
-      relPath: relative3(this.workspaceRoot, abs) || basename(abs),
+      relPath: relative4(this.workspaceRoot, abs) || basename(abs),
       content,
       bytes: Buffer.byteLength(content, "utf-8"),
       language: detectLanguage(abs)
@@ -2046,6 +2142,8 @@ function banner(state) {
   console.log("");
   console.log("  " + chalk11.bold("AXON") + chalk11.dim("  \xB7  /help for commands, /exit to leave"));
   console.log("  " + chalk11.dim(`mode: ${state.mode}  \xB7  cwd: ${state.attached.workspaceRoot}`));
+  const mem = memoryBannerLine(state.memory);
+  if (mem) console.log("  " + chalk11.dim(`memory: ${mem}`));
   console.log("");
 }
 function helpText() {
@@ -2061,6 +2159,7 @@ function helpText() {
     `  ${chalk11.cyan("/files <p1> <p2>")}    attach multiple files`,
     `  ${chalk11.cyan("/clear")}              detach files + reset conversation + drop pending edit`,
     `  ${chalk11.cyan("/status")}             attached files, mode, pending edit, turn count`,
+    `  ${chalk11.cyan("/memory")}             list resolved AXON.md memory (re-reads from disk)`,
     `  ${chalk11.cyan("/mode <auto|coding|chat>")}  toggle session mode`,
     `  ${chalk11.cyan("/apply")} or ${chalk11.cyan("a")}        apply a legacy pending edit (M2 code_edit path)`,
     `  ${chalk11.cyan("/reject")} or ${chalk11.cyan("r")}       reject the pending edit`,
@@ -2077,7 +2176,7 @@ async function runTurn(state, userPrompt) {
     return;
   }
   if (state.messages.length === 0) {
-    state.messages.push({ role: "system", content: SYSTEM_PROMPT });
+    state.messages.push({ role: "system", content: withMemory(SYSTEM_PROMPT, state.memory) });
   }
   state.messages.push({
     role: "user",
@@ -2164,6 +2263,23 @@ function cmdStatus(state) {
   }
   const la = state.pending.getLastApplied();
   if (la) console.log(`  ${chalk11.dim("undoable:")}  ${la.applied.filePath}`);
+  const mem = memoryBannerLine(state.memory);
+  console.log(`  ${chalk11.dim("memory:")}    ${mem ?? chalk11.dim("(none)")}`);
+  console.log("");
+}
+function cmdMemory(state) {
+  state.memory = resolveMemory(state.attached.workspaceRoot);
+  console.log("");
+  if (state.memory.sources.length === 0) {
+    console.log(chalk11.dim("  no AXON.md / CLAUDE.md found in ~/.axon or the cwd hierarchy"));
+  } else {
+    console.log(`  ${chalk11.dim("AXON.md memory (root-most first; later files win):")}`);
+    for (const s of state.memory.sources) {
+      console.log(`    \xB7 ${s.relLabel} ${chalk11.dim(`(${s.bytes}B, ${s.scope})`)}`);
+    }
+    if (state.memory.truncated) console.log(chalk11.yellow("  (truncated to fit the context budget)"));
+  }
+  console.log(chalk11.dim("  re-applied to the next conversation (run /clear to reseed now)"));
   console.log("");
 }
 async function dispatch(state, line) {
@@ -2199,6 +2315,10 @@ async function dispatch(state, line) {
       return { exit: true };
     case "status":
       cmdStatus(state);
+      return { exit: false };
+    case "memory":
+    case "mem":
+      cmdMemory(state);
       return { exit: false };
     case "clear":
       state.attached.clear();
@@ -2268,12 +2388,14 @@ function prompt(rl) {
   rl.prompt();
 }
 async function runRepl() {
+  const cwd = process.cwd();
   const state = {
-    attached: new AttachedFiles(process.cwd()),
+    attached: new AttachedFiles(cwd),
     mode: DEFAULT_SESSION_MODE,
     pending: new PendingEditState(),
     messages: [],
-    perms: new PermissionStore()
+    perms: new PermissionStore(),
+    memory: resolveMemory(cwd)
   };
   banner(state);
   const rl = createInterface({
@@ -2394,7 +2516,7 @@ async function runFirstRun() {
 }
 
 // src/index.ts
-var VERSION = "0.0.7";
+var VERSION = "0.0.8";
 var program = new Command();
 program.name("axon").description("AXON \u2014 the terminal client for routing + execution-memory.").version(VERSION, "-v, --version", "Show CLI version.").showHelpAfterError(chalk14.dim("(run `axon --help` for command list)"));
 registerLogin(program);

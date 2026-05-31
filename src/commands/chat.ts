@@ -19,6 +19,7 @@ import { streamChat, type SseFinalChunk } from "../sse.js";
 import { AxonBackendError } from "../http.js";
 import { runAgentTurn, type ChatMessage } from "../agent.js";
 import { PermissionStore } from "../permissions.js";
+import { resolveMemory, withMemory } from "../axonmd.js";
 
 interface ChatOpts {
   model?:          string;
@@ -144,8 +145,11 @@ async function runChat(promptArg: string, opts: ChatOpts): Promise<void> {
 
   // --agent: route through the multi-turn tool loop instead of the simple stream.
   if (opts.agent) {
+    // Inject the AXON.md hierarchy so one-shot agent runs share the same
+    // project memory as the REPL. (Plain `axon chat` stays user-only.)
+    const memory = resolveMemory();
     const messages: ChatMessage[] = [
-      { role: "system", content: AGENT_SYSTEM_PROMPT },
+      { role: "system", content: withMemory(AGENT_SYSTEM_PROMPT, memory) },
       { role: "user",   content: prompt },
     ];
     const ctl = new AbortController();
