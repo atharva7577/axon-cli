@@ -1,18 +1,20 @@
 {
   "name": "@axon/cli",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "AXON — the terminal-native client for the routing + execution-memory runtime.",
   "type": "module",
   "bin": {
-    "axon":     "./dist/index.js",
+    "axon": "./dist/index.js",
     "axon-cli": "./dist/index.js"
   },
   "scripts": {
-    "build":           "tsup",
-    "dev":             "tsx src/index.ts",
-    "typecheck":       "tsc --noEmit",
-    "start":           "node dist/index.js",
-    "prepublishOnly":  "npm run build"
+    "build": "tsup",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "axon",
@@ -28,28 +30,29 @@
   ],
   "author": "Nexalyte Tech Solutions",
   "license": "MIT",
-  "homepage":   "https://github.com/atharva7577/axon-cli#readme",
+  "homepage": "https://github.com/atharva7577/axon-cli#readme",
   "bugs": {
     "url": "https://github.com/atharva7577/axon-cli/issues"
   },
   "repository": {
     "type": "git",
-    "url":  "git+https://github.com/atharva7577/axon-cli.git"
+    "url": "git+https://github.com/atharva7577/axon-cli.git"
   },
   "dependencies": {
-    "chalk":     "^5.4.1",
+    "chalk": "^5.4.1",
     "commander": "^14.0.0",
-    "diff":      "^8.0.2",
-    "ora":       "^8.2.0",
-    "prompts":   "^2.4.2"
+    "diff": "^8.0.2",
+    "ora": "^8.2.0",
+    "prompts": "^2.4.2"
   },
   "devDependencies": {
-    "@types/diff":    "^8.0.0",
-    "@types/node":    "^25.5.0",
+    "@types/diff": "^8.0.0",
+    "@types/node": "^25.5.0",
     "@types/prompts": "^2.4.9",
-    "tsup":           "^8.5.0",
-    "tsx":            "^4.21.0",
-    "typescript":     "^6.0.2"
+    "tsup": "^8.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.7"
   },
   "engines": {
     "node": ">=20"

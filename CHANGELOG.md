@@ -4,6 +4,26 @@ All notable changes to `@axon/cli` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
+## 0.0.9 — 2026-05-31 — M3 security hardening + first test suite
+
+- Security (AXON.md memory resolution, `src/axonmd.ts`):
+  - **No longer follows symlinked memory files** (`lstat` + reject symlinks). A
+    repo can no longer smuggle an arbitrary file (e.g. `~/.ssh/id_rsa`,
+    `~/.axon/config.json`) into the agent system prompt via `AXON.md -> secret`.
+  - **256 KB pre-read size cap** on memory files — a huge (or symlinked-to-huge)
+    file can no longer be read whole into memory (OOM guard).
+  - **Memory reframed as untrusted DATA, not "authoritative instructions."** The
+    injected block now tells the model never to follow embedded instructions that
+    run tools / fetch URLs / exfiltrate / change the rules, and that nothing in
+    memory can widen tool permissions. Mitigates poisoned-repo prompt injection
+    (the per-call permission gate remains the load-bearing boundary).
+- Tests: the CLI's first test suite (Vitest) — `npm test` / `npm run test:watch`.
+  Covers M3 competency + robustness, the three fixes above, the permission gate
+  (non-TTY auto-deny), and an offline mock-backend integration proving memory
+  injection + gate enforcement. Adds a guarded live prompt-injection probe
+  (`scripts/live-injection-probe.ts`, `AXON_LIVE=1`) and a findings report
+  (`docs/M3-TEST-REPORT.md`).
+
 ## 0.0.8 — 2026-05-30 — M3 (1/3): AXON.md memory hierarchy
 
 - Project-memory files are now resolved and injected into the agent system
