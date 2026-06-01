@@ -984,19 +984,27 @@ ${rows.join("\n")}` : `(empty: ${target})`
 
 // src/tools/bash.ts
 import { spawn as spawn2 } from "child_process";
+
+// src/tools/permKey.ts
+import { relative, isAbsolute as isAbsolute5, resolve as resolve5 } from "path";
+function commandPermissionKey(cmd) {
+  const norm = cmd.trim().replace(/\s+/g, " ");
+  return norm || "(empty)";
+}
+function filePermissionKey(pathArg) {
+  const abs = isAbsolute5(pathArg) ? pathArg : resolve5(process.cwd(), pathArg);
+  const rel = relative(process.cwd(), abs);
+  return (rel || abs).replace(/\\/g, "/");
+}
+
+// src/tools/bash.ts
 var DEFAULT_TIMEOUT_MS = 3e4;
 var MAX_OUTPUT_BYTES = 16e3;
-function permissionKey(cmd) {
-  const trimmed = cmd.trim();
-  if (!trimmed) return "(empty)";
-  const m = trimmed.match(/^("([^"]+)"|'([^']+)'|(\S+))/);
-  return (m?.[2] ?? m?.[3] ?? m?.[4] ?? trimmed.split(/\s+/)[0] ?? "(unknown)").toLowerCase();
-}
 async function bash(args, perms) {
   if (!args.command || typeof args.command !== "string") {
     return { ok: false, error: "bash: 'command' is required" };
   }
-  const key = permissionKey(args.command);
+  const key = commandPermissionKey(args.command);
   const decision = await perms.request({
     tool: "bash",
     key,
@@ -1009,7 +1017,7 @@ async function bash(args, perms) {
   const isWin = process.platform === "win32";
   const shell = isWin ? "cmd.exe" : "/bin/sh";
   const flag = isWin ? "/c" : "-c";
-  return new Promise((resolve9) => {
+  return new Promise((resolve10) => {
     let stdout = "";
     let stderr = "";
     let killed = false;
@@ -1029,7 +1037,7 @@ async function bash(args, perms) {
     });
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve9({ ok: false, error: `bash spawn failed: ${err.message}` });
+      resolve10({ ok: false, error: `bash spawn failed: ${err.message}` });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -1049,7 +1057,7 @@ ${stdout}` : "stdout: (empty)",
         stderr ? `stderr:
 ${stderr}` : "stderr: (empty)"
       ].join("\n");
-      resolve9({
+      resolve10({
         ok: !killed && code === 0,
         result: body,
         error: killed ? "bash: timed out" : code !== 0 ? `bash: exit ${code}` : void 0,
@@ -1061,13 +1069,8 @@ ${stderr}` : "stderr: (empty)"
 
 // src/tools/write.ts
 import { promises as fs3 } from "fs";
-import { dirname, isAbsolute as isAbsolute5, relative, resolve as resolve5 } from "path";
+import { dirname, isAbsolute as isAbsolute6, relative as relative2, resolve as resolve6 } from "path";
 var MAX_BYTES2 = 1e6;
-function permissionKey2(absPath) {
-  const rel = relative(process.cwd(), absPath);
-  const parts = rel.split(/[\\/]/);
-  return parts.length > 1 ? `${parts[0]}/` : "<root>";
-}
 async function writeFile(args, perms) {
   if (!args.path || typeof args.path !== "string") {
     return { ok: false, error: "write_file: 'path' is required" };
@@ -1078,8 +1081,8 @@ async function writeFile(args, perms) {
   if (args.content.length > MAX_BYTES2) {
     return { ok: false, error: `write_file: content exceeds ${MAX_BYTES2} bytes \u2014 split into multiple calls or use edit_file` };
   }
-  const abs = isAbsolute5(args.path) ? args.path : resolve5(process.cwd(), args.path);
-  const key = permissionKey2(abs);
+  const abs = isAbsolute6(args.path) ? args.path : resolve6(process.cwd(), args.path);
+  const key = filePermissionKey(abs);
   let exists = false;
   try {
     await fs3.access(abs);
@@ -1092,7 +1095,7 @@ async function writeFile(args, perms) {
   const decision = await perms.request({
     tool: "write_file",
     key,
-    summary: `${verb} ${relative(process.cwd(), abs)}  (${sizeKB} KB)`
+    summary: `${verb} ${relative2(process.cwd(), abs)}  (${sizeKB} KB)`
   });
   if (decision === "deny") {
     return { ok: false, error: "write_file: user denied permission" };
@@ -1111,11 +1114,11 @@ async function writeFile(args, perms) {
 
 // src/tools/edit.ts
 import { promises as fs5 } from "fs";
-import { isAbsolute as isAbsolute7, relative as relative2, resolve as resolve7 } from "path";
+import { isAbsolute as isAbsolute8, relative as relative3, resolve as resolve8 } from "path";
 
 // src/diff.ts
 import { existsSync as existsSync2, promises as fs4 } from "fs";
-import { dirname as dirname2, isAbsolute as isAbsolute6, resolve as resolve6 } from "path";
+import { dirname as dirname2, isAbsolute as isAbsolute7, resolve as resolve7 } from "path";
 var PLACEHOLDER_PATTERNS = ["...", "// rest of code", "/* rest of code */"];
 function validateSearchReplace(edit) {
   if (edit.search.includes("...")) {
@@ -1137,7 +1140,7 @@ function validateAppliedContent(original, updated) {
 function resolveFilePath(filePath, workspaceRoot) {
   const cleaned = filePath.replace(/^file:\/\//i, "").trim();
   const root = workspaceRoot ?? process.cwd();
-  const abs = isAbsolute6(cleaned) ? cleaned : resolve6(root, cleaned);
+  const abs = isAbsolute7(cleaned) ? cleaned : resolve7(root, cleaned);
   if (/file:[/\\]/i.test(abs)) {
     throw new Error(`[diff] resolved path "${abs}" contains a nested file:// scheme \u2014 refusing to write.`);
   }
@@ -1270,11 +1273,6 @@ function formatHunkHeader(hunk) {
 }
 
 // src/tools/edit.ts
-function permissionKey3(absPath) {
-  const rel = relative2(process.cwd(), absPath);
-  const parts = rel.split(/[\\/]/);
-  return parts.length > 1 ? `${parts[0]}/` : "<root>";
-}
 async function editFile(args, perms) {
   if (!args.path || typeof args.path !== "string") {
     return { ok: false, error: "edit_file: 'path' is required" };
@@ -1282,7 +1280,7 @@ async function editFile(args, perms) {
   if (typeof args.old !== "string" || typeof args.new !== "string") {
     return { ok: false, error: "edit_file: 'old' and 'new' must be strings" };
   }
-  const abs = isAbsolute7(args.path) ? args.path : resolve7(process.cwd(), args.path);
+  const abs = isAbsolute8(args.path) ? args.path : resolve8(process.cwd(), args.path);
   let original;
   try {
     original = await fs5.readFile(abs, "utf-8");
@@ -1303,11 +1301,11 @@ async function editFile(args, perms) {
   if (!post.valid) {
     return { ok: false, error: `edit_file: ${post.reason}` };
   }
-  const diff = renderUnifiedDiff(original, updated, { filePath: relative2(process.cwd(), abs) });
+  const diff = renderUnifiedDiff(original, updated, { filePath: relative3(process.cwd(), abs) });
   const decision = await perms.request({
     tool: "edit_file",
-    key: permissionKey3(abs),
-    summary: `edit ${relative2(process.cwd(), abs)}`,
+    key: filePermissionKey(abs),
+    summary: `edit ${relative3(process.cwd(), abs)}`,
     detail: diff
   });
   if (decision === "deny") {
@@ -1629,7 +1627,7 @@ var PermissionStore = class {
 
 // src/axonmd.ts
 import { existsSync as existsSync3, readFileSync as readFileSync2, lstatSync } from "fs";
-import { dirname as dirname3, join as join2, relative as relative3 } from "path";
+import { dirname as dirname3, join as join2, relative as relative4 } from "path";
 var MAX_MEMORY_CHARS = 16e3;
 var MAX_WALK_DEPTH = 25;
 var PROJECT_FILENAMES = ["AXON.md", "CLAUDE.md"];
@@ -1646,6 +1644,16 @@ function tryReadFile(path) {
     return null;
   }
 }
+function findGitRoot(start) {
+  let dir = start;
+  for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
+    if (existsSync3(join2(dir, ".git"))) return dir;
+    const parent = dirname3(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
 function resolveMemory(cwd = process.cwd()) {
   const sources = [];
   const globalPath = join2(configDir(), "AXON.md");
@@ -1659,6 +1667,7 @@ function resolveMemory(cwd = process.cwd()) {
       bytes: Buffer.byteLength(globalContent, "utf-8")
     });
   }
+  const gitRoot = findGitRoot(cwd);
   const chain = [];
   let dir = cwd;
   for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
@@ -1669,16 +1678,17 @@ function resolveMemory(cwd = process.cwd()) {
         chain.push({
           path: p,
           scope: "project",
-          relLabel: relative3(cwd, p) || name,
+          relLabel: relative4(cwd, p) || name,
           content,
           bytes: Buffer.byteLength(content, "utf-8")
         });
         break;
       }
     }
-    const isGitRoot = existsSync3(join2(dir, ".git"));
+    if (gitRoot === null) break;
+    if (dir === gitRoot) break;
     const parent = dirname3(dir);
-    if (isGitRoot || parent === dir) break;
+    if (parent === dir) break;
     dir = parent;
   }
   chain.reverse();
@@ -1738,7 +1748,7 @@ var STDIN_INITIAL_QUIET_MS = 150;
 var STDIN_POST_DATA_QUIET_MS = 1e3;
 async function readStdin() {
   if (process.stdin.isTTY === true) return "";
-  return new Promise((resolve9, reject) => {
+  return new Promise((resolve10, reject) => {
     let data = "";
     let timer = null;
     let sawData = false;
@@ -1755,7 +1765,7 @@ async function readStdin() {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         cleanup();
-        resolve9(data);
+        resolve10(data);
       }, ms);
     };
     armQuiet(STDIN_INITIAL_QUIET_MS);
@@ -1767,11 +1777,11 @@ async function readStdin() {
     });
     process.stdin.on("end", () => {
       cleanup();
-      resolve9(data);
+      resolve10(data);
     });
     process.stdin.on("error", (err) => {
       cleanup();
-      if (sawData) resolve9(data);
+      if (sawData) resolve10(data);
       else reject(err);
     });
   });
@@ -1937,7 +1947,7 @@ import chalk11 from "chalk";
 
 // src/context.ts
 import { promises as fs6 } from "fs";
-import { basename, isAbsolute as isAbsolute8, relative as relative4, resolve as resolve8 } from "path";
+import { basename, isAbsolute as isAbsolute9, relative as relative5, resolve as resolve9 } from "path";
 var MAX_CONTEXT_CHARS = 32e3;
 function totalChars(files) {
   let n = 0;
@@ -1967,7 +1977,7 @@ var AttachedFiles = class {
    * Throws on FS error or when adding the file would exceed MAX_CONTEXT_CHARS.
    */
   async add(rawPath) {
-    const abs = isAbsolute8(rawPath) ? rawPath : resolve8(this.workspaceRoot, rawPath);
+    const abs = isAbsolute9(rawPath) ? rawPath : resolve9(this.workspaceRoot, rawPath);
     if (this.files.has(abs)) return this.files.get(abs);
     const stat = await fs6.stat(abs);
     if (!stat.isFile()) {
@@ -1982,7 +1992,7 @@ var AttachedFiles = class {
     }
     const file = {
       path: abs,
-      relPath: relative4(this.workspaceRoot, abs) || basename(abs),
+      relPath: relative5(this.workspaceRoot, abs) || basename(abs),
       content,
       bytes: Buffer.byteLength(content, "utf-8"),
       language: detectLanguage(abs)
@@ -2520,7 +2530,7 @@ async function runFirstRun() {
 }
 
 // src/index.ts
-var VERSION = "0.0.9";
+var VERSION = "0.0.10";
 var program = new Command();
 program.name("axon").description("AXON \u2014 the terminal client for routing + execution-memory.").version(VERSION, "-v, --version", "Show CLI version.").showHelpAfterError(chalk14.dim("(run `axon --help` for command list)"));
 registerLogin(program);

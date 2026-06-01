@@ -1,6 +1,6 @@
 {
   "name": "@axon/cli",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "AXON — the terminal-native client for the routing + execution-memory runtime.",
   "type": "module",
   "bin": {

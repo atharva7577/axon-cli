@@ -9,6 +9,7 @@
 import { spawn } from "node:child_process";
 import type { ToolResult } from "./registry.js";
 import type { PermissionStore } from "../permissions.js";
+import { commandPermissionKey } from "./permKey.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 16_000;
@@ -18,19 +19,12 @@ export interface BashArgs {
   timeoutMs?: number;
 }
 
-/** Coarse permission key: first token of the command (executable name). */
-function permissionKey(cmd: string): string {
-  const trimmed = cmd.trim();
-  if (!trimmed) return "(empty)";
-  const m = trimmed.match(/^("([^"]+)"|'([^']+)'|(\S+))/);
-  return (m?.[2] ?? m?.[3] ?? m?.[4] ?? trimmed.split(/\s+/)[0] ?? "(unknown)").toLowerCase();
-}
-
 export async function bash(args: BashArgs, perms: PermissionStore): Promise<ToolResult> {
   if (!args.command || typeof args.command !== "string") {
     return { ok: false, error: "bash: 'command' is required" };
   }
-  const key = permissionKey(args.command);
+  // Exact-command key: "always allow" matches only this same command.
+  const key = commandPermissionKey(args.command);
   const decision = await perms.request({
     tool:    "bash",
     key,

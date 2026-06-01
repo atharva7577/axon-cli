@@ -69,6 +69,18 @@ function tryReadFile(path: string): string | null {
   }
 }
 
+/** Walk up from `start` looking for a .git marker; return the repo root or null. */
+function findGitRoot(start: string): string | null {
+  let dir = start;
+  for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+
 /**
  * Walk the hierarchy and read every memory file. Best-effort: never throws.
  * @param cwd Workspace root to walk up from (defaults to process.cwd()).
@@ -86,7 +98,10 @@ export function resolveMemory(cwd: string = process.cwd()): ResolvedMemory {
     });
   }
 
-  // 2. cwd → up walk, collecting each ancestor dir's memory file.
+  // 2. cwd → up walk, BOUNDED to the git repo. Outside a repo (no .git found),
+  //    read only the cwd's own file — never climb into unrelated ancestors
+  //    ($HOME, a node_modules parent, …).
+  const gitRoot = findGitRoot(cwd);
   const chain: MemorySource[] = [];
   let dir = cwd;
   for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
@@ -102,10 +117,12 @@ export function resolveMemory(cwd: string = process.cwd()): ResolvedMemory {
         break; // AXON.md wins over CLAUDE.md within the same dir
       }
     }
-    // Stop at the git root (inclusive) or the filesystem root.
-    const isGitRoot = existsSync(join(dir, ".git"));
-    const parent    = dirname(dir);
-    if (isGitRoot || parent === dir) break;
+    // No repo → stop after the cwd. Otherwise stop at the git root (inclusive)
+    // or the filesystem root.
+    if (gitRoot === null) break;
+    if (dir === gitRoot) break;
+    const parent = dirname(dir);
+    if (parent === dir) break;
     dir = parent;
   }
   // `chain` is cwd-first; reverse so root-most is first (cwd-local ends up last = wins).

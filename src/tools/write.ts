@@ -9,20 +9,13 @@ import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { ToolResult } from "./registry.js";
 import type { PermissionStore } from "../permissions.js";
+import { filePermissionKey } from "./permKey.js";
 
 const MAX_BYTES = 1_000_000;
 
 export interface WriteFileArgs {
   path:    string;
   content: string;
-}
-
-function permissionKey(absPath: string): string {
-  const rel = relative(process.cwd(), absPath);
-  const parts = rel.split(/[\\/]/);
-  // Use the first path segment as the bucket (src/, scripts/, etc.).
-  // For files at repo root, use "<root>" so the same prompt key matches all.
-  return parts.length > 1 ? `${parts[0]}/` : "<root>";
 }
 
 export async function writeFile(args: WriteFileArgs, perms: PermissionStore): Promise<ToolResult> {
@@ -37,7 +30,7 @@ export async function writeFile(args: WriteFileArgs, perms: PermissionStore): Pr
   }
 
   const abs = isAbsolute(args.path) ? args.path : resolve(process.cwd(), args.path);
-  const key = permissionKey(abs);
+  const key = filePermissionKey(abs);
 
   let exists = false;
   try { await fs.access(abs); exists = true; } catch { exists = false; }

@@ -4,6 +4,23 @@ All notable changes to `@axon/cli` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
+## 0.0.10 — 2026-05-31 — tighter permission keys + repo-confined memory walk
+
+Follow-up hardening for two residuals flagged in the M3 test report.
+
+- **Permission gate — exact "always allow" keys** (`src/tools/permKey.ts`, new):
+  bash now keys on the **full command** (`"npm test"` ≠ `"npm run build"`),
+  write_file/edit_file on the **exact file path** (`src/a.ts` ≠ `src/b.ts`);
+  web_fetch still keys on hostname. Closes the "allow once → allow a whole family"
+  gap — the gate is the load-bearing defense against a poisoned `AXON.md`.
+- **Memory walk confined to the git repo** (`src/axonmd.ts` `findGitRoot`): the
+  `AXON.md`/`CLAUDE.md` ancestor walk now stops at the detected git root; with no
+  `.git` above the cwd, only the cwd's own file is read — no more climbing up to 25
+  unrelated parent dirs (`$HOME`, a `node_modules` ancestor).
+- Tests: `test/permkey.test.ts` added; walk + permission-store tests updated.
+  Still flagged-not-changed: CLAUDE.md ingestion notice, outbound tool-result
+  redaction (see `docs/M3-TEST-REPORT.md`).
+
 ## 0.0.9 — 2026-05-31 — M3 security hardening + first test suite
 
 - Security (AXON.md memory resolution, `src/axonmd.ts`):

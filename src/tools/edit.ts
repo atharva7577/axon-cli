@@ -13,17 +13,12 @@ import { computeUpdatedContent, validateAppliedContent, validateSearchReplace } 
 import { renderUnifiedDiff } from "../render.js";
 import type { ToolResult } from "./registry.js";
 import type { PermissionStore } from "../permissions.js";
+import { filePermissionKey } from "./permKey.js";
 
 export interface EditFileArgs {
   path: string;
   old:  string;
   new:  string;
-}
-
-function permissionKey(absPath: string): string {
-  const rel = relative(process.cwd(), absPath);
-  const parts = rel.split(/[\\/]/);
-  return parts.length > 1 ? `${parts[0]}/` : "<root>";
 }
 
 export async function editFile(args: EditFileArgs, perms: PermissionStore): Promise<ToolResult> {
@@ -63,7 +58,7 @@ export async function editFile(args: EditFileArgs, perms: PermissionStore): Prom
 
   const decision = await perms.request({
     tool:    "edit_file",
-    key:     permissionKey(abs),
+    key:     filePermissionKey(abs),
     summary: `edit ${relative(process.cwd(), abs)}`,
     detail:  diff,
   });

@@ -90,18 +90,24 @@ prompting, so headless runs can't silently execute mutating tools. Verified by
 `test/permissions.test.ts` and end-to-end in `test/integration.agent.test.ts`
 (a scripted `web_fetch` to a canary is denied; the canary gets **0 hits**).
 
-### Documented behaviour (not changed — flagged for a decision)
+### Fixed in v0.0.10 (follow-up pass)
+
+- **Coarse "always allow" keys (was MEDIUM) — FIXED.** Keys are now exact:
+  bash = full command (`"npm test"` ≠ `"npm run build"`), write/edit = exact file
+  path (`src/a.ts` ≠ `src/b.ts`); web_fetch keeps hostname. A grant can no longer
+  be widened by a later call. New `src/tools/permKey.ts`; tests in
+  `test/permkey.test.ts`. (This was the highest-value hardening — the live probe
+  showed the gate is the only real defense.)
+- **25-ancestor walk without `.git` (was MEDIUM) — FIXED.** The walk is now
+  confined to the detected git repo; with no `.git` above the cwd, only the cwd's
+  own file is read (no climb into `$HOME` / `node_modules` ancestors). See
+  `findGitRoot` in `src/axonmd.ts`; test in `test/axonmd.test.ts`.
+
+### Documented behaviour (still not changed — flagged for a decision)
 
 - **CLAUDE.md silent ingestion (privacy, LOW/MEDIUM):** running `axon` in a
   Claude-Code project ingests its `CLAUDE.md` and sends it to
   `api.axon.nexalyte.tech`. By design (compat), but worth a one-time notice.
-- **25-ancestor walk without `.git` (MEDIUM):** with no git root above cwd the
-  walk reads `AXON.md`/`CLAUDE.md` from up to 25 parent dirs (e.g. `$HOME`, a
-  `node_modules` ancestor). Consider only walking inside a detected git repo, or
-  lowering the cap.
-- **Coarse "always allow" keys (MEDIUM):** bash key = `argv[0]`, write/edit =
-  top-level dir, web_fetch = hostname. One "always allow `npm`" then permits any
-  `npm <subcommand>` for the session. Documented in `test/permissions.test.ts`.
 - **Tool results flow to the backend:** `read_file`/`bash`/`web_fetch` output
   (incl. any secrets they surface) is sent back as message history. Inherent to
   agent mode; out of M3 scope.
@@ -144,8 +150,8 @@ non-TTY so any tool call is auto-denied.
 
 ## Recommendations
 
-1. **Done:** F1–F3 fixed. Ship them (rebuild dist).
-2. Consider: confine the walk to a detected git repo (kills the F4 ancestor case),
-   and a first-run notice when a `CLAUDE.md` is ingested.
-3. Consider tightening "always allow" keys (e.g. full command for bash, or a
-   shorter grant lifetime).
+1. **Done (v0.0.9):** F1–F3 fixed (symlink, size cap, injection framing).
+2. **Done (v0.0.10):** walk confined to the git repo, and "always allow" keys
+   tightened to exact command / exact file.
+3. **Still open (your call):** a first-run notice when a `CLAUDE.md` is ingested,
+   and optional redaction of secrets in outbound tool results.

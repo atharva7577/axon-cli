@@ -56,11 +56,14 @@ describe("permission gate", () => {
     }
   });
 
-  it("'always allow' keys are COARSE: one grant covers every argument (documented risk)", () => {
+  it("the store matches keys EXACTLY — granularity is set by the tools (see permkey.test.ts)", () => {
     const p = new PermissionStore();
-    p.allowAlways("bash", "npm");                  // user clicked "always" on `npm test` once…
-    expect(p.hasPermission("bash", "npm")).toBe(true); // …now ANY `npm <subcommand>` runs silently
+    // Tools now pass the full command as the key (commandPermissionKey), so a
+    // grant for one command does NOT cover a different one.
+    p.allowAlways("bash", "npm test");
+    expect(p.hasPermission("bash", "npm test")).toBe(true);
+    expect(p.hasPermission("bash", "npm run build")).toBe(false);
     p.allowAlways("web_fetch", "raw.githubusercontent.com");
-    expect(p.hasPermission("web_fetch", "raw.githubusercontent.com")).toBe(true); // any path on that host
+    expect(p.hasPermission("web_fetch", "raw.githubusercontent.com")).toBe(true);
   });
 });

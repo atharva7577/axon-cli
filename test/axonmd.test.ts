@@ -157,17 +157,16 @@ describe("robustness / edge", () => {
     expect(mem.sources[0]!.content.length).toBe(16_000 + "\n…(truncated)".length);
   });
 
-  it("walk depth is capped (~25): a file far above cwd with no .git is not read", () => {
-    const base = tmpTree();
-    let p = base;
-    const dirs: string[] = [];
-    for (let i = 0; i < 30; i++) { p = join(p, `d${i}`); dirs.push(p); }
-    ensureDir(dirs[29]!);                                  // cwd = depth 0
-    writeFileDeep(join(dirs[28]!, "AXON.md"), "NEAR-MEM"); // depth 1  → read
-    writeFileDeep(join(dirs[0]!,  "AXON.md"), "FAR-MEM");  // depth 29 → NOT read
-    const mem = resolveMemory(dirs[29]!);
-    expect(mem.block).toContain("NEAR-MEM");
-    expect(mem.block).not.toContain("FAR-MEM");
+  it("no .git: reads only the cwd file, never climbs into ancestors", () => {
+    const base = tmpTree();                 // NO .git anywhere in this tree
+    const parent = join(base, "parent");
+    const cwd = join(parent, "child");
+    ensureDir(cwd);
+    writeFileDeep(join(parent, "AXON.md"), "PARENT-MEM");
+    writeFileDeep(join(cwd, "AXON.md"), "CWD-MEM");
+    const mem = resolveMemory(cwd);
+    expect(mem.block).toContain("CWD-MEM");
+    expect(mem.block).not.toContain("PARENT-MEM"); // outside a repo → no ancestor climb
   });
 
   it("a directory named AXON.md is skipped (isFile check)", () => {
