@@ -16,7 +16,9 @@ export interface ToolSchema {
     description:  string;
     parameters: {
       type:       "object";
-      properties: Record<string, { type: string; description: string; items?: unknown; enum?: string[] }>;
+      // `unknown` so an MCP server's arbitrary JSON-Schema properties pass through
+      // (the 8 built-ins still use { type, description } objects, which conform).
+      properties: Record<string, unknown>;
       required?:  string[];
     };
   };

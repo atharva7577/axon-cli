@@ -1,6 +1,6 @@
 {
   "name": "@axon/cli",
-  "version": "0.0.12",
+  "version": "0.1.0",
   "description": "AXON — the terminal-native client for the routing + execution-memory runtime.",
   "type": "module",
   "bin": {
@@ -39,11 +39,13 @@
     "url": "git+https://github.com/atharva7577/axon-cli.git"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "chalk": "^5.4.1",
     "commander": "^14.0.0",
     "diff": "^8.0.2",
     "ora": "^8.2.0",
-    "prompts": "^2.4.2"
+    "prompts": "^2.4.2",
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/diff": "^8.0.0",

@@ -4,6 +4,38 @@ All notable changes to `@axon/cli` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
+## 0.1.0 — 2026-06-02 — M3 (2/3): MCP (`axon mcp add|list|remove|serve`)
+
+The last M3 piece — and the one that opens AXON both ways: consume the MCP
+ecosystem, and expose AXON's own routing brain over MCP. Completes M3.
+
+- **Consume external MCP servers.** `axon mcp add <name> -- <command> [args…]`
+  (with `--env KEY=VAL`, `--cwd`, `--disabled`), `list`, `remove` — stored in
+  `~/.axon/mcp.json` (Claude-Code `mcpServers` shape, atomic 0600). The REPL and
+  `chat --agent` spawn the enabled servers at session start and offer their tools
+  to the model as `mcp__<server>__<tool>`, alongside the 8 built-ins. The banner
+  shows the live server/tool count.
+- **Expose AXON over MCP.** `axon mcp serve` is a thin stdio↔Streamable-HTTP
+  proxy: point a stdio MCP host (Claude Desktop, …) at `axon mcp serve` and it
+  forwards `tools/list` / `tools/call` to the AXON backend's `/mcp` with your
+  Bearer key — so `route_for_intent`, `get_edit_pattern`,
+  `query_workspace_memory` (whatever the backend exposes) appear with zero
+  reimplementation. Schemas pass through verbatim.
+- **Security:** each MCP tool call is **permission-gated per server** ("always
+  allow this server this session"); non-TTY auto-denies. Server names validated
+  `^[A-Za-z0-9_-]+$`. `mcp serve` enforces HTTPS to the backend (localhost
+  exempt) so the key never travels in clear text. The v0.0.11 workspace
+  confinement / SSRF guards still apply to AXON's own tools.
+- New deps: `@modelcontextprotocol/sdk@^1.29.0` (matches the backend) + `zod`
+  (a required SDK peer). The SDK's `cross-spawn` handles Windows `npx`/`uvx`
+  `.cmd` resolution and merges a safe default environment, so no per-platform
+  spawn special-casing was needed.
+- New: `src/mcp/{registry,client,schema-bridge,serve}.ts`, `src/commands/mcp.ts`.
+  `agent.ts` gains `mcpPool`/`extraTools`; `registry.ts` gains `dispatchMcpCall`;
+  `ToolSchema.parameters.properties` widened to pass MCP input schemas through.
+- Tests: `test/mcp.test.ts` (registry CRUD + atomic write + name validation,
+  qualified-name sanitization, inputSchema → ToolSchema mapping) — 73 pass.
+
 ## 0.0.12 — 2026-06-02 — M3 (3/3): skills (`axon skill list|add|run`)
 
 Claude-Code-compatible `SKILL.md` skills — saved instructions the agent carries

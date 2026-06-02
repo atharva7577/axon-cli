@@ -16,9 +16,10 @@
 import chalk from "chalk";
 import { AxonBackendError } from "./http.js";
 import { streamChat, type SseFinalChunk } from "./sse.js";
-import { ALL_TOOLS } from "./tools/schemas.js";
-import { dispatchTool, type ToolCall, type ToolResult } from "./tools/registry.js";
+import { ALL_TOOLS, type ToolSchema } from "./tools/schemas.js";
+import { dispatchTool, dispatchMcpCall, type ToolCall, type ToolResult } from "./tools/registry.js";
 import { PermissionStore } from "./permissions.js";
+import type { McpClientPool } from "./mcp/client.js";
 
 /** Per-call ceiling on accumulated tool-call arguments (OOM / runaway-stream guard). */
 const MAX_TOOL_ARGS_BYTES = 256_000;
@@ -47,6 +48,10 @@ export interface AgentOptions {
   maxTurns?:  number;
   /** Print the final routing trace line. Default true. */
   showMeta?:  boolean;
+  /** Live MCP server pool — calls to its tools route here instead of the built-ins. */
+  mcpPool?:   McpClientPool;
+  /** Extra tool schemas (e.g. the MCP pool's) merged with the 8 built-ins. */
+  extraTools?: ToolSchema[];
 }
 
 function formatMetaLine(final: SseFinalChunk): string | null {
@@ -77,7 +82,7 @@ async function consumeStream(
     messages,
     stream:   true,
     mode:     opts.mode,
-    tools:    ALL_TOOLS,
+    tools:    [...ALL_TOOLS, ...(opts.extraTools ?? [])],
     parallel_tool_calls: false,
   };
   const stream = streamChat(body, {
@@ -187,7 +192,9 @@ export async function runAgentTurn(
     for (const call of toolCalls) {
       let result: ToolResult;
       try {
-        result = await dispatchTool(call, perms);
+        result = opts.mcpPool?.owns(call.name)
+          ? await dispatchMcpCall(opts.mcpPool, call, perms)
+          : await dispatchTool(call, perms);
       } catch (err) {
         result = { ok: false, error: `tool dispatch threw: ${(err as Error).message}` };
       }

@@ -20,6 +20,7 @@ import { AxonBackendError } from "../http.js";
 import { runAgentTurn, type ChatMessage } from "../agent.js";
 import { PermissionStore } from "../permissions.js";
 import { resolveMemory, withMemory } from "../axonmd.js";
+import { startMcpPool } from "../mcp/client.js";
 
 interface ChatOpts {
   model?:          string;
@@ -152,6 +153,7 @@ async function runChat(promptArg: string, opts: ChatOpts): Promise<void> {
       { role: "system", content: withMemory(AGENT_SYSTEM_PROMPT, memory) },
       { role: "user",   content: prompt },
     ];
+    const mcpPool = await startMcpPool((m) => console.error(chalk.yellow(`⚠ ${m}`)));
     const ctl = new AbortController();
     const onSignal = () => ctl.abort(new Error("user cancelled"));
     process.on("SIGINT", onSignal);
@@ -169,9 +171,12 @@ async function runChat(promptArg: string, opts: ChatOpts): Promise<void> {
         signal:   ctl.signal,
         maxTurns: opts.maxTurns ?? 25,
         showMeta: opts.meta !== false,
+        mcpPool:    mcpPool ?? undefined,
+        extraTools: mcpPool?.schemas(),
       });
     } finally {
       process.off("SIGINT", onSignal);
+      await mcpPool?.stop();
     }
     return;
   }

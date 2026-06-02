@@ -16,6 +16,7 @@ import { bash,      type BashArgs      } from "./bash.js";
 import { writeFile, type WriteFileArgs } from "./write.js";
 import { editFile,  type EditFileArgs  } from "./edit.js";
 import { webFetch,  type WebFetchArgs  } from "./webfetch.js";
+import type { McpClientPool } from "../mcp/client.js";
 
 export interface ToolResult {
   ok:         boolean;
@@ -78,4 +79,38 @@ export async function dispatchTool(call: ToolCall, perms: PermissionStore): Prom
     default:
       return { ok: false, error: `unknown tool: ${call.name}` };
   }
+}
+
+/**
+ * Dispatch a qualified MCP tool call (mcp__server__tool). External MCP tools can
+ * do anything the spawned server can, so each is permission-gated per server
+ * ("always allow this server this session"); non-TTY auto-denies.
+ */
+export async function dispatchMcpCall(
+  pool:  McpClientPool,
+  call:  ToolCall,
+  perms: PermissionStore,
+): Promise<ToolResult> {
+  let args: Record<string, unknown>;
+  try {
+    args = call.arguments ? JSON.parse(call.arguments) : {};
+  } catch (err) {
+    return { ok: false, error: `bad MCP tool arguments: ${(err as Error).message}` };
+  }
+
+  const server = pool.serverOf(call.name) ?? "mcp";
+  const argPreview = JSON.stringify(args);
+  console.log("");
+  console.log(chalk.dim(`  ⏵ ${call.name}(${argPreview.length > 80 ? argPreview.slice(0, 77) + "…" : argPreview})`));
+
+  const decision = await perms.request({
+    tool:    "mcp",
+    key:     server,
+    summary: `MCP ${chalk.bold(call.name)} ${chalk.dim(`(server: ${server})`)}`,
+    detail:  argPreview.length > 2 ? `  args: ${argPreview.length > 400 ? argPreview.slice(0, 400) + "…" : argPreview}` : undefined,
+  });
+  if (decision === "deny") {
+    return { ok: false, error: `mcp: user denied permission for server "${server}"` };
+  }
+  return pool.callTool(call.name, args);
 }

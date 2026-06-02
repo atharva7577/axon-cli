@@ -28,6 +28,7 @@ import { runAgentTurn, type ChatMessage } from "./agent.js";
 import { resolveMemory, withMemory, memoryBannerLine, claudeMdSources, type ResolvedMemory } from "./axonmd.js";
 import { printSkillList, runSkill } from "./commands/skill.js";
 import { findSkill } from "./skills/discovery.js";
+import { startMcpPool, type McpClientPool } from "./mcp/client.js";
 
 const SYSTEM_PROMPT = [
   "You are AXON, a terminal-native coding assistant running on the user's machine.",
@@ -46,6 +47,8 @@ interface ReplState {
   perms:     PermissionStore;
   /** AXON.md hierarchy, resolved once at session start. */
   memory:    ResolvedMemory;
+  /** External MCP servers spawned for this session (null when none configured). */
+  mcpPool:   McpClientPool | null;
 }
 
 function banner(state: ReplState): void {
@@ -56,6 +59,9 @@ function banner(state: ReplState): void {
   if (mem) console.log("  " + chalk.dim(`memory: ${mem}`));
   const claude = claudeMdSources(state.memory);
   if (claude.length) console.log("  " + chalk.dim(`note: trusting ${claude.join(", ")} for Claude-Code compatibility`));
+  if (state.mcpPool) {
+    console.log("  " + chalk.dim(`mcp: ${state.mcpPool.serverCount} server${state.mcpPool.serverCount === 1 ? "" : "s"}, ${state.mcpPool.toolCount} tool${state.mcpPool.toolCount === 1 ? "" : "s"}`));
+  }
   console.log("");
 }
 
@@ -114,6 +120,8 @@ async function runTurn(state: ReplState, userPrompt: string): Promise<void> {
       signal:   ctl.signal,
       maxTurns: 25,
       showMeta: true,
+      mcpPool:    state.mcpPool ?? undefined,
+      extraTools: state.mcpPool?.schemas(),
     });
   } finally {
     process.off("SIGINT", onSig);
@@ -337,6 +345,8 @@ function prompt(rl: Interface): void {
 
 export async function runRepl(): Promise<void> {
   const cwd = process.cwd();
+  // Spawn configured MCP servers before the banner so their tool count shows.
+  const mcpPool = await startMcpPool((m) => console.log(chalk.yellow(`  ⚠ ${m}`)));
   const state: ReplState = {
     attached: new AttachedFiles(cwd),
     mode:     DEFAULT_SESSION_MODE,
@@ -344,6 +354,7 @@ export async function runRepl(): Promise<void> {
     messages: [],
     perms:    new PermissionStore(),
     memory:   resolveMemory(cwd),
+    mcpPool,
   };
   banner(state);
 
@@ -369,5 +380,6 @@ export async function runRepl(): Promise<void> {
     prompt(rl);
   }
   rl.close();
+  await state.mcpPool?.stop();
   console.log("");
 }

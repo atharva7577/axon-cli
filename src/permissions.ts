@@ -16,7 +16,7 @@
 import chalk from "chalk";
 import prompts from "prompts";
 
-export type PermissionTool = "bash" | "write_file" | "edit_file" | "web_fetch" | "read_outside";
+export type PermissionTool = "bash" | "write_file" | "edit_file" | "web_fetch" | "read_outside" | "mcp";
 export type PermissionDecision = "allow" | "always" | "deny";
 
 export interface PermissionRequest {
