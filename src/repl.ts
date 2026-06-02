@@ -26,6 +26,8 @@ import { postEditorEvent } from "./telemetry.js";
 import { PermissionStore } from "./permissions.js";
 import { runAgentTurn, type ChatMessage } from "./agent.js";
 import { resolveMemory, withMemory, memoryBannerLine, claudeMdSources, type ResolvedMemory } from "./axonmd.js";
+import { printSkillList, runSkill } from "./commands/skill.js";
+import { findSkill } from "./skills/discovery.js";
 
 const SYSTEM_PROMPT = [
   "You are AXON, a terminal-native coding assistant running on the user's machine.",
@@ -71,6 +73,8 @@ function helpText(): string {
     `  ${chalk.cyan("/clear")}              detach files + reset conversation + drop pending edit`,
     `  ${chalk.cyan("/status")}             attached files, mode, pending edit, turn count`,
     `  ${chalk.cyan("/memory")}             list resolved AXON.md memory (re-reads from disk)`,
+    `  ${chalk.cyan("/skills")}             list discoverable SKILL.md skills`,
+    `  ${chalk.cyan("/skill <name> [prompt]")}  run a skill in this session`,
     `  ${chalk.cyan("/mode <auto|coding|chat>")}  toggle session mode`,
     `  ${chalk.cyan("/apply")} or ${chalk.cyan("a")}        apply a legacy pending edit (M2 code_edit path)`,
     `  ${chalk.cyan("/reject")} or ${chalk.cyan("r")}       reject the pending edit`,
@@ -243,6 +247,26 @@ async function dispatch(state: ReplState, line: string): Promise<{ exit: boolean
     case "mem":
       cmdMemory(state);
       return { exit: false };
+
+    case "skills":
+      printSkillList(state.attached.workspaceRoot);
+      return { exit: false };
+
+    case "skill": {
+      const name = rest[0];
+      if (!name) {
+        console.log(chalk.dim("usage: /skill <name> [prompt]   ·   /skills to list"));
+        return { exit: false };
+      }
+      const s = findSkill(name, state.attached.workspaceRoot);
+      if (!s) {
+        console.log(chalk.red(`✗ skill not found: ${name}`) + chalk.dim(" — /skills to list"));
+        return { exit: false };
+      }
+      // Share the session permission store so allowlist decisions persist.
+      await runSkill(s, rest.slice(1).join(" "), { mode: state.mode, perms: state.perms });
+      return { exit: false };
+    }
 
     case "clear":
       state.attached.clear();

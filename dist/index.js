@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/index.ts
-import chalk16 from "chalk";
+import chalk17 from "chalk";
 import { Command } from "commander";
 
 // src/commands/login.ts
@@ -2179,12 +2179,239 @@ async function runChatDirect(promptArg, opts) {
   return runChat(promptArg, opts);
 }
 
+// src/commands/skill.ts
+import chalk13 from "chalk";
+import { existsSync as existsSync6, mkdirSync as mkdirSync2, writeFileSync as writeFileSync2 } from "fs";
+import { dirname as dirname5 } from "path";
+
+// src/skills/discovery.ts
+import { existsSync as existsSync5, lstatSync as lstatSync2, readFileSync as readFileSync3, readdirSync } from "fs";
+import { join as join4 } from "path";
+var MAX_SKILL_BYTES = 256 * 1024;
+var NAME_RE = /^[A-Za-z0-9_-]+$/;
+function isValidSkillName(name) {
+  return NAME_RE.test(name);
+}
+function stripQuotes(s) {
+  const t = s.trim();
+  if (t.length >= 2 && (t[0] === '"' && t.endsWith('"') || t[0] === "'" && t.endsWith("'"))) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+function parseFrontmatter(raw) {
+  const lines = raw.replace(/\r\n/g, "\n").split("\n");
+  if (lines[0]?.trim() !== "---") return { meta: {}, body: raw.trim() };
+  const meta = {};
+  let i = 1;
+  let closed = false;
+  for (; i < lines.length; i++) {
+    if (lines[i].trim() === "---") {
+      i++;
+      closed = true;
+      break;
+    }
+    const m = lines[i].match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (m) meta[m[1].toLowerCase()] = stripQuotes(m[2]);
+  }
+  if (!closed) return { meta: {}, body: raw.trim() };
+  return { meta, body: lines.slice(i).join("\n").trim() };
+}
+function safeRead(path) {
+  try {
+    if (!existsSync5(path)) return null;
+    const st = lstatSync2(path);
+    if (st.isSymbolicLink() || !st.isFile()) return null;
+    if (st.size > MAX_SKILL_BYTES) return null;
+    return readFileSync3(path, "utf-8");
+  } catch {
+    return null;
+  }
+}
+function skillDirs(cwd) {
+  return [
+    { dir: join4(configDir(), "skills"), scope: "global", label: "~/.axon/skills" },
+    { dir: join4(cwd, ".claude", "skills"), scope: "project", label: ".claude/skills" },
+    { dir: join4(cwd, ".axon", "skills"), scope: "project", label: ".axon/skills" }
+  ];
+}
+function readSkillDir(d) {
+  if (!existsSync5(d.dir)) return [];
+  let entries;
+  try {
+    entries = readdirSync(d.dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const e of entries) {
+    let name = null;
+    let file = null;
+    if (e.isFile() && /\.md$/i.test(e.name) && e.name.toLowerCase() !== "skill.md") {
+      name = e.name.replace(/\.md$/i, "");
+      file = join4(d.dir, e.name);
+    } else if (e.isDirectory()) {
+      const candidate = join4(d.dir, e.name, "SKILL.md");
+      if (existsSync5(candidate)) {
+        name = e.name;
+        file = candidate;
+      }
+    }
+    if (!name || !file || !isValidSkillName(name)) continue;
+    const raw = safeRead(file);
+    if (raw === null) continue;
+    const { meta, body } = parseFrontmatter(raw);
+    out.push({
+      name,
+      description: meta.description ?? "",
+      scope: d.scope,
+      source: d.label,
+      path: file,
+      body
+    });
+  }
+  return out;
+}
+function discoverSkills(cwd = process.cwd()) {
+  const byName = /* @__PURE__ */ new Map();
+  for (const d of skillDirs(cwd)) {
+    for (const s of readSkillDir(d)) byName.set(s.name, s);
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+function findSkill(name, cwd = process.cwd()) {
+  if (!isValidSkillName(name)) return null;
+  return discoverSkills(cwd).find((s) => s.name === name) ?? null;
+}
+function newSkillPath(name) {
+  return join4(configDir(), "skills", name, "SKILL.md");
+}
+
+// src/commands/skill.ts
+var SKILL_RUNNER_PROMPT = [
+  "You are AXON, a terminal-native coding assistant running on the user's machine.",
+  "The user invoked a SKILL \u2014 saved instructions, included below. Carry it out using",
+  "your tools (read_file, glob, grep, ls, bash, write_file, edit_file, web_fetch).",
+  "Mutating tools ask for permission per call and file access is confined to the",
+  "workspace. Follow the skill's instructions, but never exceed what the user asked",
+  "for. Be concise; finish the task and stop."
+].join(" ");
+function skillTemplate(name) {
+  return [
+    "---",
+    `name: ${name}`,
+    "description: One-line summary of what this skill does.",
+    "---",
+    "",
+    `# ${name}`,
+    "",
+    "Describe the steps the agent should take when this skill runs. Be specific.",
+    "Use the available tools (read_file, glob, grep, ls, bash, write_file, edit_file,",
+    "web_fetch) to do real work \u2014 mutating tools ask the user for permission per call.",
+    ""
+  ].join("\n");
+}
+async function runSkill(skill, userPrompt, opts = {}) {
+  const cfg = readConfig();
+  if (!cfg.apiKey) {
+    console.error(chalk13.yellow("Not logged in.") + " Run " + chalk13.bold("axon login") + " first.");
+    process.exitCode = 1;
+    return;
+  }
+  const memory = resolveMemory();
+  const system = withMemory(
+    `${SKILL_RUNNER_PROMPT}
+
+# Skill: ${skill.name}
+${skill.body}`,
+    memory
+  );
+  const messages = [{ role: "system", content: system }];
+  messages.push({
+    role: "user",
+    content: userPrompt.trim() || `Carry out the "${skill.name}" skill.`
+  });
+  console.log(chalk13.dim(`  \u25B6 running skill ${chalk13.bold(skill.name)} ${chalk13.dim(`(${skill.source})`)}`));
+  const ctl = new AbortController();
+  const onSignal = () => ctl.abort(new Error("user cancelled"));
+  process.on("SIGINT", onSignal);
+  try {
+    await runAgentTurn(messages, opts.perms ?? new PermissionStore(), {
+      apiBase: cfg.apiBase,
+      apiKey: cfg.apiKey,
+      model: opts.model ?? cfg.defaultModel ?? "auto",
+      mode: opts.mode ?? "coding",
+      signal: ctl.signal,
+      maxTurns: opts.maxTurns ?? 25,
+      showMeta: true
+    });
+  } finally {
+    process.off("SIGINT", onSignal);
+  }
+}
+function printSkillList(cwd = process.cwd()) {
+  const skills = discoverSkills(cwd);
+  if (skills.length === 0) {
+    console.log(chalk13.dim("  no skills found. Create one with ") + chalk13.bold("axon skill add <name>"));
+    console.log(chalk13.dim("  (searched ~/.axon/skills, ./.axon/skills, ./.claude/skills)"));
+    return;
+  }
+  const width = Math.max(...skills.map((s) => s.name.length), 4);
+  console.log("");
+  for (const s of skills) {
+    const desc = s.description || chalk13.dim("(no description)");
+    console.log(`  ${chalk13.cyan(s.name.padEnd(width))}  ${chalk13.dim(`[${s.scope}]`)}  ${desc}`);
+  }
+  console.log("");
+}
+function registerSkill(program2) {
+  const skill = program2.command("skill").description("Discover and run SKILL.md skills (Claude-Code compatible).");
+  skill.command("list").alias("ls").description("List discoverable skills (~/.axon/skills, ./.axon/skills, ./.claude/skills).").action(() => printSkillList());
+  skill.command("add <name>").description("Scaffold a new skill at ~/.axon/skills/<name>/SKILL.md.").action((name) => {
+    if (!isValidSkillName(name)) {
+      console.error(chalk13.red(`\u2717 invalid skill name "${name}" \u2014 use letters, digits, - and _ only.`));
+      process.exitCode = 1;
+      return;
+    }
+    const file = newSkillPath(name);
+    if (existsSync6(file)) {
+      console.error(chalk13.yellow(`Skill already exists: ${file}`));
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      mkdirSync2(dirname5(file), { recursive: true });
+      writeFileSync2(file, skillTemplate(name), "utf-8");
+    } catch (err) {
+      console.error(chalk13.red(`\u2717 could not create skill: ${err.message}`));
+      process.exitCode = 1;
+      return;
+    }
+    console.log(chalk13.green("\u2713") + ` created ${file}`);
+    console.log(chalk13.dim(`  edit it, then run: `) + chalk13.bold(`axon skill run ${name} "\u2026"`));
+  });
+  skill.command("run <name> [prompt...]").description("Run a skill as an agent (same tools + permissions as `chat --agent`).").option("-m, --model <model>", "Specific model id (default: auto \u2014 let AXON route).").option("-M, --mode <mode>", "Session mode: auto | coding | chat", "coding").option("--max-turns <n>", "Cap LLM round-trips (default 25).", (v) => parseInt(v, 10)).action(async (name, promptParts, opts) => {
+    const s = findSkill(name);
+    if (!s) {
+      console.error(chalk13.red(`\u2717 skill not found: ${name}`));
+      console.error(chalk13.dim("  run ") + chalk13.bold("axon skill list") + chalk13.dim(" to see what's available."));
+      process.exitCode = 1;
+      return;
+    }
+    await runSkill(s, (promptParts ?? []).join(" "), {
+      model: opts.model,
+      mode: opts.mode,
+      maxTurns: opts.maxTurns
+    });
+  });
+}
+
 // src/commands/repl.ts
-import chalk14 from "chalk";
+import chalk15 from "chalk";
 
 // src/repl.ts
 import { createInterface } from "readline";
-import chalk13 from "chalk";
+import chalk14 from "chalk";
 
 // src/context.ts
 import { promises as fs6 } from "fs";
@@ -2400,41 +2627,43 @@ var SYSTEM_PROMPT = [
 ].join(" ");
 function banner(state) {
   console.log("");
-  console.log("  " + chalk13.bold("AXON") + chalk13.dim("  \xB7  /help for commands, /exit to leave"));
-  console.log("  " + chalk13.dim(`mode: ${state.mode}  \xB7  cwd: ${state.attached.workspaceRoot}`));
+  console.log("  " + chalk14.bold("AXON") + chalk14.dim("  \xB7  /help for commands, /exit to leave"));
+  console.log("  " + chalk14.dim(`mode: ${state.mode}  \xB7  cwd: ${state.attached.workspaceRoot}`));
   const mem = memoryBannerLine(state.memory);
-  if (mem) console.log("  " + chalk13.dim(`memory: ${mem}`));
+  if (mem) console.log("  " + chalk14.dim(`memory: ${mem}`));
   const claude = claudeMdSources(state.memory);
-  if (claude.length) console.log("  " + chalk13.dim(`note: trusting ${claude.join(", ")} for Claude-Code compatibility`));
+  if (claude.length) console.log("  " + chalk14.dim(`note: trusting ${claude.join(", ")} for Claude-Code compatibility`));
   console.log("");
 }
 function helpText() {
   return [
     "",
-    chalk13.bold("how to use"),
+    chalk14.bold("how to use"),
     `  Just type. The model has tools to read files, glob, grep, ls, run`,
     `  shell commands, write/edit files, and fetch URLs. Mutating tools`,
     `  (bash / write / edit / web_fetch) ask for permission per call.`,
     "",
-    chalk13.bold("slash commands"),
-    `  ${chalk13.cyan("/file <path>")}        attach a file (counts toward 32k context cap)`,
-    `  ${chalk13.cyan("/files <p1> <p2>")}    attach multiple files`,
-    `  ${chalk13.cyan("/clear")}              detach files + reset conversation + drop pending edit`,
-    `  ${chalk13.cyan("/status")}             attached files, mode, pending edit, turn count`,
-    `  ${chalk13.cyan("/memory")}             list resolved AXON.md memory (re-reads from disk)`,
-    `  ${chalk13.cyan("/mode <auto|coding|chat>")}  toggle session mode`,
-    `  ${chalk13.cyan("/apply")} or ${chalk13.cyan("a")}        apply a legacy pending edit (M2 code_edit path)`,
-    `  ${chalk13.cyan("/reject")} or ${chalk13.cyan("r")}       reject the pending edit`,
-    `  ${chalk13.cyan("/undo")}               revert the last applied edit`,
-    `  ${chalk13.cyan("/help")}               this list`,
-    `  ${chalk13.cyan("/exit")} or ${chalk13.cyan("Ctrl-D")}   leave the REPL`,
+    chalk14.bold("slash commands"),
+    `  ${chalk14.cyan("/file <path>")}        attach a file (counts toward 32k context cap)`,
+    `  ${chalk14.cyan("/files <p1> <p2>")}    attach multiple files`,
+    `  ${chalk14.cyan("/clear")}              detach files + reset conversation + drop pending edit`,
+    `  ${chalk14.cyan("/status")}             attached files, mode, pending edit, turn count`,
+    `  ${chalk14.cyan("/memory")}             list resolved AXON.md memory (re-reads from disk)`,
+    `  ${chalk14.cyan("/skills")}             list discoverable SKILL.md skills`,
+    `  ${chalk14.cyan("/skill <name> [prompt]")}  run a skill in this session`,
+    `  ${chalk14.cyan("/mode <auto|coding|chat>")}  toggle session mode`,
+    `  ${chalk14.cyan("/apply")} or ${chalk14.cyan("a")}        apply a legacy pending edit (M2 code_edit path)`,
+    `  ${chalk14.cyan("/reject")} or ${chalk14.cyan("r")}       reject the pending edit`,
+    `  ${chalk14.cyan("/undo")}               revert the last applied edit`,
+    `  ${chalk14.cyan("/help")}               this list`,
+    `  ${chalk14.cyan("/exit")} or ${chalk14.cyan("Ctrl-D")}   leave the REPL`,
     ""
   ].join("\n");
 }
 async function runTurn(state, userPrompt) {
   const cfg = readConfig();
   if (!cfg.apiKey) {
-    console.log(chalk13.yellow("(not logged in \u2014 run `axon login`)"));
+    console.log(chalk14.yellow("(not logged in \u2014 run `axon login`)"));
     return;
   }
   if (state.messages.length === 0) {
@@ -2464,7 +2693,7 @@ async function runTurn(state, userPrompt) {
 async function cmdApply(state) {
   const p = state.pending.getPending();
   if (!p) {
-    console.log(chalk13.dim("(nothing pending)"));
+    console.log(chalk14.dim("(nothing pending)"));
     return;
   }
   try {
@@ -2476,74 +2705,74 @@ async function cmdApply(state) {
     state.pending.clearPending();
     await postEditorEvent({ event: "edit_applied", requestId: p.requestId, filePath: applied.filePath });
     await postEditorEvent({ event: "edit_accepted", requestId: p.requestId, filePath: applied.filePath });
-    console.log(chalk13.green(`\u2713 applied ${applied.filePath}`) + chalk13.dim(applied.wasNewFile ? "  (new file)" : ""));
+    console.log(chalk14.green(`\u2713 applied ${applied.filePath}`) + chalk14.dim(applied.wasNewFile ? "  (new file)" : ""));
   } catch (err) {
-    console.error(chalk13.red(`\u2717 ${err.message}`));
+    console.error(chalk14.red(`\u2717 ${err.message}`));
   }
 }
 async function cmdReject(state) {
   const p = state.pending.getPending();
   if (!p) {
-    console.log(chalk13.dim("(nothing pending)"));
+    console.log(chalk14.dim("(nothing pending)"));
     return;
   }
   state.pending.clearPending();
   await postEditorEvent({ event: "edit_rejected", requestId: p.requestId, filePath: p.payload.filePath, method: "command" });
-  console.log(chalk13.yellow("\u2717 rejected") + chalk13.dim(" \u2014 fed back to routing memory"));
+  console.log(chalk14.yellow("\u2717 rejected") + chalk14.dim(" \u2014 fed back to routing memory"));
 }
 async function cmdUndo(state) {
   const la = state.pending.getLastApplied();
   if (!la) {
-    console.log(chalk13.dim("(nothing to undo)"));
+    console.log(chalk14.dim("(nothing to undo)"));
     return;
   }
   try {
     await revertAppliedEdit(la.applied);
     state.pending.clearLastApplied();
     await postEditorEvent({ event: "edit_rejected", requestId: la.requestId, filePath: la.applied.filePath, method: "undo" });
-    console.log(chalk13.yellow(`\u21B6 reverted ${la.applied.filePath}`));
+    console.log(chalk14.yellow(`\u21B6 reverted ${la.applied.filePath}`));
   } catch (err) {
-    console.error(chalk13.red(`\u2717 ${err.message}`));
+    console.error(chalk14.red(`\u2717 ${err.message}`));
   }
 }
 function cmdStatus(state) {
   const turnCount = Math.max(0, state.messages.filter((m) => m.role !== "system").length);
   console.log("");
-  console.log(`  ${chalk13.dim("mode:")}      ${state.mode}`);
-  console.log(`  ${chalk13.dim("cwd:")}       ${state.attached.workspaceRoot}`);
-  console.log(`  ${chalk13.dim("turns:")}     ${turnCount} message${turnCount === 1 ? "" : "s"} in history`);
-  console.log(`  ${chalk13.dim("attached:")}  ${state.attached.size()} file${state.attached.size() === 1 ? "" : "s"}`);
+  console.log(`  ${chalk14.dim("mode:")}      ${state.mode}`);
+  console.log(`  ${chalk14.dim("cwd:")}       ${state.attached.workspaceRoot}`);
+  console.log(`  ${chalk14.dim("turns:")}     ${turnCount} message${turnCount === 1 ? "" : "s"} in history`);
+  console.log(`  ${chalk14.dim("attached:")}  ${state.attached.size()} file${state.attached.size() === 1 ? "" : "s"}`);
   for (const f of state.attached.list()) {
-    console.log(`    \xB7 ${f.relPath} ${chalk13.dim(`(${f.bytes}B)`)}`);
+    console.log(`    \xB7 ${f.relPath} ${chalk14.dim(`(${f.bytes}B)`)}`);
   }
   const p = state.pending.getPending();
   if (p) {
     const kind = "newContent" in p.payload ? "full-file" : "search/replace";
-    console.log(`  ${chalk13.dim("pending:")}   ${p.payload.filePath} ${chalk13.dim(`(${kind})`)}`);
+    console.log(`  ${chalk14.dim("pending:")}   ${p.payload.filePath} ${chalk14.dim(`(${kind})`)}`);
   } else {
-    console.log(`  ${chalk13.dim("pending:")}   ${chalk13.dim("(none)")}`);
+    console.log(`  ${chalk14.dim("pending:")}   ${chalk14.dim("(none)")}`);
   }
   const la = state.pending.getLastApplied();
-  if (la) console.log(`  ${chalk13.dim("undoable:")}  ${la.applied.filePath}`);
+  if (la) console.log(`  ${chalk14.dim("undoable:")}  ${la.applied.filePath}`);
   const mem = memoryBannerLine(state.memory);
-  console.log(`  ${chalk13.dim("memory:")}    ${mem ?? chalk13.dim("(none)")}`);
+  console.log(`  ${chalk14.dim("memory:")}    ${mem ?? chalk14.dim("(none)")}`);
   const claude = claudeMdSources(state.memory);
-  if (claude.length) console.log(`  ${chalk13.dim("compat:")}    ${chalk13.dim(`trusting ${claude.join(", ")} (Claude-Code)`)}`);
+  if (claude.length) console.log(`  ${chalk14.dim("compat:")}    ${chalk14.dim(`trusting ${claude.join(", ")} (Claude-Code)`)}`);
   console.log("");
 }
 function cmdMemory(state) {
   state.memory = resolveMemory(state.attached.workspaceRoot);
   console.log("");
   if (state.memory.sources.length === 0) {
-    console.log(chalk13.dim("  no AXON.md / CLAUDE.md found in ~/.axon or the cwd hierarchy"));
+    console.log(chalk14.dim("  no AXON.md / CLAUDE.md found in ~/.axon or the cwd hierarchy"));
   } else {
-    console.log(`  ${chalk13.dim("AXON.md memory (root-most first; later files win):")}`);
+    console.log(`  ${chalk14.dim("AXON.md memory (root-most first; later files win):")}`);
     for (const s of state.memory.sources) {
-      console.log(`    \xB7 ${s.relLabel} ${chalk13.dim(`(${s.bytes}B, ${s.scope})`)}`);
+      console.log(`    \xB7 ${s.relLabel} ${chalk14.dim(`(${s.bytes}B, ${s.scope})`)}`);
     }
-    if (state.memory.truncated) console.log(chalk13.yellow("  (truncated to fit the context budget)"));
+    if (state.memory.truncated) console.log(chalk14.yellow("  (truncated to fit the context budget)"));
   }
-  console.log(chalk13.dim("  re-applied to the next conversation (run /clear to reseed now)"));
+  console.log(chalk14.dim("  re-applied to the next conversation (run /clear to reseed now)"));
   console.log("");
 }
 async function dispatch(state, line) {
@@ -2559,7 +2788,7 @@ async function dispatch(state, line) {
     return { exit: false };
   }
   if (pendingExists && (trimmed === "e" || trimmed === "E")) {
-    console.log(chalk13.dim("(pending kept \u2014 send a refining prompt to update it)"));
+    console.log(chalk14.dim("(pending kept \u2014 send a refining prompt to update it)"));
     return { exit: false };
   }
   if (!trimmed.startsWith("/")) {
@@ -2584,11 +2813,28 @@ async function dispatch(state, line) {
     case "mem":
       cmdMemory(state);
       return { exit: false };
+    case "skills":
+      printSkillList(state.attached.workspaceRoot);
+      return { exit: false };
+    case "skill": {
+      const name = rest[0];
+      if (!name) {
+        console.log(chalk14.dim("usage: /skill <name> [prompt]   \xB7   /skills to list"));
+        return { exit: false };
+      }
+      const s = findSkill(name, state.attached.workspaceRoot);
+      if (!s) {
+        console.log(chalk14.red(`\u2717 skill not found: ${name}`) + chalk14.dim(" \u2014 /skills to list"));
+        return { exit: false };
+      }
+      await runSkill(s, rest.slice(1).join(" "), { mode: state.mode, perms: state.perms });
+      return { exit: false };
+    }
     case "clear":
       state.attached.clear();
       state.pending.clearPending();
       state.messages.length = 0;
-      console.log(chalk13.dim("(cleared attachments + conversation + pending)"));
+      console.log(chalk14.dim("(cleared attachments + conversation + pending)"));
       return { exit: false };
     case "mode": {
       const m = args.trim();
@@ -2597,38 +2843,38 @@ async function dispatch(state, line) {
         return { exit: false };
       }
       if (!isSessionMode(m)) {
-        console.log(chalk13.red(`\u2717 unknown mode "${m}" \u2014 expected auto | coding | chat`));
+        console.log(chalk14.red(`\u2717 unknown mode "${m}" \u2014 expected auto | coding | chat`));
         return { exit: false };
       }
       state.mode = m;
-      console.log(chalk13.dim(`(mode \u2192 ${m})`));
+      console.log(chalk14.dim(`(mode \u2192 ${m})`));
       return { exit: false };
     }
     case "file": {
       if (!args) {
-        console.log(chalk13.red("\u2717 /file <path>"));
+        console.log(chalk14.red("\u2717 /file <path>"));
         return { exit: false };
       }
       try {
         const f = await state.attached.add(args);
-        console.log(chalk13.dim(`\u2713 attached ${f.relPath} (${f.bytes}B)`));
+        console.log(chalk14.dim(`\u2713 attached ${f.relPath} (${f.bytes}B)`));
       } catch (err) {
-        console.log(chalk13.red(`\u2717 ${err.message}`));
+        console.log(chalk14.red(`\u2717 ${err.message}`));
       }
       return { exit: false };
     }
     case "files": {
       const paths = rest.filter(Boolean);
       if (paths.length === 0) {
-        console.log(chalk13.red("\u2717 /files <path1> <path2> \u2026"));
+        console.log(chalk14.red("\u2717 /files <path1> <path2> \u2026"));
         return { exit: false };
       }
       for (const p of paths) {
         try {
           const f = await state.attached.add(p);
-          console.log(chalk13.dim(`\u2713 ${f.relPath} (${f.bytes}B)`));
+          console.log(chalk14.dim(`\u2713 ${f.relPath} (${f.bytes}B)`));
         } catch (err) {
-          console.log(chalk13.red(`\u2717 ${p}: ${err.message}`));
+          console.log(chalk14.red(`\u2717 ${p}: ${err.message}`));
         }
       }
       return { exit: false };
@@ -2643,12 +2889,12 @@ async function dispatch(state, line) {
       await cmdUndo(state);
       return { exit: false };
     default:
-      console.log(chalk13.red(`\u2717 unknown command "/${cmd}" \u2014 try /help`));
+      console.log(chalk14.red(`\u2717 unknown command "/${cmd}" \u2014 try /help`));
       return { exit: false };
   }
 }
 function prompt(rl) {
-  rl.setPrompt(chalk13.bold.green("\u203A "));
+  rl.setPrompt(chalk14.bold.green("\u203A "));
   rl.prompt();
 }
 async function runRepl() {
@@ -2674,7 +2920,7 @@ async function runRepl() {
       const { exit } = await dispatch(state, rawLine);
       if (exit) break;
     } catch (err) {
-      console.error(chalk13.red(`\u2717 ${err.message ?? err}`));
+      console.error(chalk14.red(`\u2717 ${err.message ?? err}`));
     }
     prompt(rl);
   }
@@ -2687,7 +2933,7 @@ function registerRepl(program2) {
   program2.command("repl").description("Start the interactive REPL (also the bare `axon` action when logged in).").action(async () => {
     const cfg = readConfig();
     if (!cfg.apiKey) {
-      console.error(chalk14.yellow("Not logged in.") + " Run " + chalk14.bold("axon login") + " first.");
+      console.error(chalk15.yellow("Not logged in.") + " Run " + chalk15.bold("axon login") + " first.");
       process.exitCode = 1;
       return;
     }
@@ -2696,12 +2942,12 @@ function registerRepl(program2) {
 }
 
 // src/onboarding.ts
-import chalk15 from "chalk";
+import chalk16 from "chalk";
 import prompts2 from "prompts";
 function banner2() {
   console.log("");
-  console.log("  " + chalk15.bold("AXON") + chalk15.dim("  \xB7  the operating layer for AI agents"));
-  console.log("  " + chalk15.dim("run \xB7 route \xB7 remember \xB7 spend"));
+  console.log("  " + chalk16.bold("AXON") + chalk16.dim("  \xB7  the operating layer for AI agents"));
+  console.log("  " + chalk16.dim("run \xB7 route \xB7 remember \xB7 spend"));
   console.log("");
 }
 function isInteractive() {
@@ -2715,8 +2961,8 @@ function shouldRunFirstRun() {
 }
 async function runFirstRun() {
   banner2();
-  console.log("  " + chalk15.dim("Looks like this is your first AXON session."));
-  console.log("  " + chalk15.dim("Let's get you authenticated \u2014 pick one:"));
+  console.log("  " + chalk16.dim("Looks like this is your first AXON session."));
+  console.log("  " + chalk16.dim("Let's get you authenticated \u2014 pick one:"));
   console.log("");
   const response = await prompts2({
     type: "select",
@@ -2758,7 +3004,7 @@ async function runFirstRun() {
         validate: (v) => v.trim().startsWith("axon_") ? true : "Must start with axon_"
       });
       if (!keyResp.key) {
-        console.log(chalk15.dim("  (cancelled)"));
+        console.log(chalk16.dim("  (cancelled)"));
         return;
       }
       console.log("");
@@ -2769,26 +3015,27 @@ async function runFirstRun() {
       const url = "https://axon.nexalyte.tech";
       const opened = openBrowser(url);
       console.log("");
-      console.log("  " + chalk15.cyan(url) + (opened ? chalk15.dim("  (opened for you)") : ""));
-      console.log("  " + chalk15.dim("Claim a seat. Once approved you'll receive an AXON API key \u2014 paste it via `axon login --key`."));
+      console.log("  " + chalk16.cyan(url) + (opened ? chalk16.dim("  (opened for you)") : ""));
+      console.log("  " + chalk16.dim("Claim a seat. Once approved you'll receive an AXON API key \u2014 paste it via `axon login --key`."));
       return;
     }
     default:
-      console.log(chalk15.dim("  (no changes)"));
+      console.log(chalk16.dim("  (no changes)"));
       return;
   }
 }
 
 // src/index.ts
-var VERSION = "0.0.11";
+var VERSION = "0.0.12";
 var program = new Command();
-program.name("axon").description("AXON \u2014 the terminal client for routing + execution-memory.").version(VERSION, "-v, --version", "Show CLI version.").showHelpAfterError(chalk16.dim("(run `axon --help` for command list)"));
+program.name("axon").description("AXON \u2014 the terminal client for routing + execution-memory.").version(VERSION, "-v, --version", "Show CLI version.").showHelpAfterError(chalk17.dim("(run `axon --help` for command list)"));
 registerLogin(program);
 registerWhoami(program);
 registerLogout(program);
 registerStats(program);
 registerConfig(program);
 registerChat(program);
+registerSkill(program);
 registerRepl(program);
 async function main() {
   if (process.argv.length <= 2) {
@@ -2824,7 +3071,7 @@ main().then(
   // For a one-shot CLI we want to terminate as soon as the command returns.
   () => process.exit(process.exitCode ?? 0),
   (err) => {
-    console.error(chalk16.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk17.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
 );

@@ -22,12 +22,13 @@ import { registerLogout } from "./commands/logout.js";
 import { registerStats }  from "./commands/stats.js";
 import { registerConfig } from "./commands/config.js";
 import { registerChat, runChatDirect } from "./commands/chat.js";
+import { registerSkill } from "./commands/skill.js";
 import { registerRepl } from "./commands/repl.js";
 import { runFirstRun, shouldRunFirstRun } from "./onboarding.js";
 import { runRepl } from "./repl.js";
 import { readConfig } from "./config.js";
 
-const VERSION = "0.0.11";
+const VERSION = "0.0.12";
 
 const program = new Command();
 
@@ -43,6 +44,7 @@ registerLogout(program);
 registerStats(program);
 registerConfig(program);
 registerChat(program);
+registerSkill(program);
 registerRepl(program);
 
 async function main(): Promise<void> {

@@ -4,6 +4,29 @@ All notable changes to `@axon/cli` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
+## 0.0.12 — 2026-06-02 — M3 (3/3): skills (`axon skill list|add|run`)
+
+Claude-Code-compatible `SKILL.md` skills — saved instructions the agent carries
+out with the full tool kit. Zero new dependencies.
+
+- **`axon skill list`** — table of discoverable skills with scope + description.
+- **`axon skill add <name>`** — scaffold `~/.axon/skills/<name>/SKILL.md` from a
+  frontmatter template.
+- **`axon skill run <name> [prompt…]`** — load the skill, inject its body into the
+  agent system prompt (alongside resolved `AXON.md` memory), and run it through
+  the same `runAgentTurn` loop as `chat --agent` — identical tools, the per-call
+  permission gate, and the v0.0.11 workspace-confinement / SSRF guards.
+- REPL: `/skills` lists, `/skill <name> [prompt]` runs a skill in-session (sharing
+  the session's permission allowlist).
+- Discovery (`src/skills/discovery.ts`, new): scans `~/.axon/skills/` →
+  `./.claude/skills/` (compat) → `./.axon/skills/` (highest precedence); a skill
+  is `<name>.md` or `<name>/SKILL.md`. Hand-rolled frontmatter parser (flat
+  `key: value`, no YAML dep). Hardened like AXON.md memory: **skill names
+  validated `^[A-Za-z0-9_-]+$`** (no `../` traversal), symlinked skill files
+  rejected, 256 KB cap, best-effort (never throws).
+- Tests: `test/skills.test.ts` (frontmatter, precedence, name-validation,
+  symlink rejection) — 67 pass total.
+
 ## 0.0.11 — 2026-06-02 — security & robustness hardening
 
 A full audit of everything shipped so far drove this pass. Headline fix: the
