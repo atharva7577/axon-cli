@@ -26,13 +26,16 @@ jobs:
 
   dist-check:
     name: committed dist/ matches a fresh build
-    runs-on: ubuntu-latest
+    # Runs on windows to match the maintainer's build platform: esbuild output is
+    # deterministic per version, but the committed bundle is built on Windows, so
+    # we reproduce it here on the same OS with the SAME locked toolchain (npm ci).
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --no-audit --no-fund
+      - run: npm ci --no-audit --no-fund
       - run: npm run build
       # The bundle is committed (so `npm i -g github:…` works without devDeps).
       # Fail the build if src/ changed but dist/ wasn't rebuilt + committed.
@@ -41,6 +44,6 @@ jobs:
         run: |
           if ! git diff --quiet -- dist; then
             echo "::error::dist/ is stale — run 'npm run build' and commit the result."
-            git --no-pager diff --stat -- dist
+            git --no-pager diff -- dist | head -40
             exit 1
           fi
