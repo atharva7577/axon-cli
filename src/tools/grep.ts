@@ -10,6 +10,8 @@ import { glob as fspGlob } from "node:fs/promises";
 import { promises as fsp } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ToolResult } from "./registry.js";
+import type { PermissionStore } from "../permissions.js";
+import { canonicalize, isInsideRoot } from "./workspace.js";
 
 const MAX_MATCHES = 100;
 const MAX_FILES = 50;
@@ -31,7 +33,7 @@ export interface GrepArgs {
   case_insensitive?: boolean;
 }
 
-export async function grep(args: GrepArgs): Promise<ToolResult> {
+export async function grep(args: GrepArgs, _perms: PermissionStore): Promise<ToolResult> {
   if (!args.pattern || typeof args.pattern !== "string") {
     return { ok: false, error: "grep: 'pattern' is required" };
   }
@@ -59,6 +61,9 @@ export async function grep(args: GrepArgs): Promise<ToolResult> {
       if (scanned >= MAX_FILES) { truncated = true; break; }
       if (results.length >= MAX_MATCHES) { truncated = true; break; }
       const abs = isAbsolute(rel) ? rel : resolve(cwd, rel);
+      // grep READS file contents, so confine by the canonical path (defeats a
+      // `../../**` pattern and any in-repo symlink that points outside the root).
+      if (!isInsideRoot(canonicalize(abs))) continue;
       try {
         const stat = await fsp.stat(abs);
         if (!stat.isFile()) continue;

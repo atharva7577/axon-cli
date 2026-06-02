@@ -10,6 +10,7 @@
  * permanent off-switch via `axon config set telemetry off` or --no-telemetry.
  */
 
+import { basename } from "node:path";
 import { postJson, AxonBackendError } from "./http.js";
 import { readConfig } from "./config.js";
 
@@ -46,6 +47,10 @@ export async function postEditorEvent(input: EditorEventInput): Promise<boolean>
 
   const wire: EditorEventWire = {
     ...input,
+    // Send only the filename — never the full path. The backend keys routing
+    // memory on the prompt/edit, not the location, so the parent path would only
+    // leak the user's project structure.
+    filePath:  input.filePath ? basename(input.filePath) : undefined,
     // Backend overwrites tenantId from the bearer-auth context, but the
     // validation gate insists on a string field — send the configured one.
     tenantId:  cfg.tenantId ?? "cli",

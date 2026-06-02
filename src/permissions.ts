@@ -9,13 +9,14 @@
  *   - "Always allow" writes the key into a Map<tool, Set<key>>, scoped to
  *     this REPL session — restart resets it.
  *
- * Read-only tools (read_file, glob, grep, ls) never call into this module.
+ * Read-only tools (read_file, glob, grep, ls) only call into this module when a
+ * path escapes the workspace root — then they request "read_outside".
  */
 
 import chalk from "chalk";
 import prompts from "prompts";
 
-export type PermissionTool = "bash" | "write_file" | "edit_file" | "web_fetch";
+export type PermissionTool = "bash" | "write_file" | "edit_file" | "web_fetch" | "read_outside";
 export type PermissionDecision = "allow" | "always" | "deny";
 
 export interface PermissionRequest {

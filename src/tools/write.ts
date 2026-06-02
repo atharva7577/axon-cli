@@ -5,11 +5,13 @@
  * key so "always allow writes under src/" matches every src/** write.
  */
 
+import chalk from "chalk";
 import { promises as fs } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, relative } from "node:path";
 import type { ToolResult } from "./registry.js";
 import type { PermissionStore } from "../permissions.js";
 import { filePermissionKey } from "./permKey.js";
+import { classifyWrite } from "./workspace.js";
 
 const MAX_BYTES = 1_000_000;
 
@@ -29,18 +31,19 @@ export async function writeFile(args: WriteFileArgs, perms: PermissionStore): Pr
     return { ok: false, error: `write_file: content exceeds ${MAX_BYTES} bytes — split into multiple calls or use edit_file` };
   }
 
-  const abs = isAbsolute(args.path) ? args.path : resolve(process.cwd(), args.path);
+  const { abs, outside } = classifyWrite(args.path);
   const key = filePermissionKey(abs);
 
   let exists = false;
   try { await fs.access(abs); exists = true; } catch { exists = false; }
   const verb = exists ? "overwrite" : "create";
   const sizeKB = (args.content.length / 1024).toFixed(1);
+  const where = outside ? `${chalk.red("⚠ OUTSIDE WORKSPACE")} ${abs}` : relative(process.cwd(), abs);
 
   const decision = await perms.request({
     tool:    "write_file",
     key,
-    summary: `${verb} ${relative(process.cwd(), abs)}  (${sizeKB} KB)`,
+    summary: `${verb} ${where}  (${sizeKB} KB)`,
   });
   if (decision === "deny") {
     return { ok: false, error: "write_file: user denied permission" };

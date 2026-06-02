@@ -53,6 +53,25 @@ function trimBase(base: string): string {
   return base.replace(/\/+$/, "");
 }
 
+/**
+ * Refuse to send the bearer key / device code to a non-HTTPS backend. http:// is
+ * allowed only for localhost (dev) or under AXON_ALLOW_INSECURE=1. Throws on an
+ * insecure or malformed base. Exported so `config set` / `login --base` can
+ * fail fast before persisting.
+ */
+export function assertSecureBase(base: string): void {
+  let u: URL;
+  try { u = new URL(base); } catch { throw new Error(`invalid apiBase: '${base}'`); }
+  if (u.protocol === "https:") return;
+  const host = u.hostname.replace(/\.$/, "").toLowerCase();
+  const localOk = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  if (u.protocol === "http:" && (localOk || process.env.AXON_ALLOW_INSECURE === "1")) return;
+  throw new Error(
+    `refusing to use a non-HTTPS backend (${base}). The API key would travel in clear text. ` +
+    `Use https://, or set AXON_ALLOW_INSECURE=1 for a trusted local dev backend.`,
+  );
+}
+
 function buildHeaders(cfg: AxonConfig, opts: HttpOptions): Record<string, string> {
   const h: Record<string, string> = {
     "Content-Type": "application/json",
@@ -94,6 +113,7 @@ async function send<T>(
 ): Promise<JsonResult<T>> {
   const cfg     = opts.cfg ?? readConfig();
   const base    = trimBase(cfg.apiBase);
+  assertSecureBase(base);
   const url     = `${base}${path.startsWith("/") ? path : `/${path}`}`;
   const headers = buildHeaders(cfg, opts);
 

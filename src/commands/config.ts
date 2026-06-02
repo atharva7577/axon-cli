@@ -10,6 +10,7 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { configPath, patchConfig, readConfig, type AxonConfig } from "../config.js";
+import { assertSecureBase } from "../http.js";
 
 type ConfigKey = keyof AxonConfig;
 const WRITABLE_KEYS: ConfigKey[] = [
@@ -89,6 +90,11 @@ export function registerConfig(program: Command): void {
       let parsed: unknown;
       try { parsed = parseValue(key, value); }
       catch (err) { console.error(chalk.red(`✗ ${(err as Error).message}`)); process.exitCode = 1; return; }
+      // Fail fast on an insecure backend URL before persisting it.
+      if (key === "apiBase" && typeof parsed === "string") {
+        try { assertSecureBase(parsed); }
+        catch (err) { console.error(chalk.red(`✗ ${(err as Error).message}`)); process.exitCode = 1; return; }
+      }
       patchConfig({ [key]: parsed } as Partial<AxonConfig>);
       console.log(chalk.green("✓") + ` ${key} updated.`);
     });

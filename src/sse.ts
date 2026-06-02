@@ -15,7 +15,10 @@
  */
 
 import { readConfig } from "./config.js";
-import { AxonBackendError } from "./http.js";
+import { AxonBackendError, assertSecureBase } from "./http.js";
+
+/** Cap the SSE reassembly buffer — a backend that never sends `\n\n` can't OOM us. */
+const MAX_SSE_BUFFER = 1_000_000;
 
 export interface SseFinalChunk {
   id?:           string;
@@ -68,6 +71,7 @@ export async function* streamChat(
 ): AsyncGenerator<SseEvent, void, unknown> {
   const cfg = readConfig();
   const apiBase = (options.apiBase || cfg.apiBase).replace(/\/+$/, "");
+  assertSecureBase(apiBase);
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -136,6 +140,9 @@ export async function* streamChat(
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > MAX_SSE_BUFFER) {
+        throw new Error("SSE buffer exceeded — malformed stream (no event boundary within 1 MB)");
+      }
 
       // Split on SSE event boundary. Each event is `data: <payload>\n\n`.
       let boundary: number;

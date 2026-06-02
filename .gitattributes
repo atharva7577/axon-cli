@@ -14,3 +14,7 @@ install.sh   text eol=lf
 
 # PowerShell convention: CRLF on disk.
 *.ps1        text eol=crlf
+
+# Committed esbuild bundle — pin to LF so a Windows commit can't rewrite line
+# endings and trip the CI stale-dist check.
+/dist/index.js text eol=lf

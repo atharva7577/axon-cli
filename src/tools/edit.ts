@@ -7,13 +7,18 @@
  * doesn't break the edit.
  */
 
+import chalk from "chalk";
 import { promises as fs } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { relative } from "node:path";
 import { computeUpdatedContent, validateAppliedContent, validateSearchReplace } from "../diff.js";
 import { renderUnifiedDiff } from "../render.js";
 import type { ToolResult } from "./registry.js";
 import type { PermissionStore } from "../permissions.js";
 import { filePermissionKey } from "./permKey.js";
+import { classifyWrite } from "./workspace.js";
+
+/** Refuse to read an oversized file whole into memory before editing (OOM guard). */
+const MAX_EDIT_BYTES = 10 * 1024 * 1024;
 
 export interface EditFileArgs {
   path: string;
@@ -29,9 +34,13 @@ export async function editFile(args: EditFileArgs, perms: PermissionStore): Prom
     return { ok: false, error: "edit_file: 'old' and 'new' must be strings" };
   }
 
-  const abs = isAbsolute(args.path) ? args.path : resolve(process.cwd(), args.path);
+  const { abs, outside } = classifyWrite(args.path);
   let original: string;
   try {
+    const stat = await fs.stat(abs);
+    if (stat.size > MAX_EDIT_BYTES) {
+      return { ok: false, error: `edit_file: '${abs}' is ${(stat.size / 1024 / 1024).toFixed(1)} MB — too large to edit in memory` };
+    }
     original = await fs.readFile(abs, "utf-8");
   } catch (err) {
     return { ok: false, error: `edit_file: cannot read ${abs}: ${(err as Error).message}` };
@@ -59,7 +68,7 @@ export async function editFile(args: EditFileArgs, perms: PermissionStore): Prom
   const decision = await perms.request({
     tool:    "edit_file",
     key:     filePermissionKey(abs),
-    summary: `edit ${relative(process.cwd(), abs)}`,
+    summary: outside ? `edit ${chalk.red("⚠ OUTSIDE WORKSPACE")} ${abs}` : `edit ${relative(process.cwd(), abs)}`,
     detail:  diff,
   });
   if (decision === "deny") {

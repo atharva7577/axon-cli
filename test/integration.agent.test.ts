@@ -104,7 +104,10 @@ async function runCli(args: string[]): Promise<AgentRun> {
   const out = await new Promise<string>((resolve) => {
     const child = spawn(process.execPath,
       [join(REPO_ROOT, "dist", "index.js"), ...args],
-      { cwd: project, env: { ...process.env, AXON_CONFIG_DIR: cfgDir, NO_COLOR: "1" } });
+      // AXON_ALLOW_LOCAL_FETCH=1: the canary is on 127.0.0.1, and this test is
+      // about the *permission gate* (non-TTY deny), not the SSRF guard — let the
+      // call reach the gate. (The SSRF block itself is covered in webfetch.test.ts.)
+      { cwd: project, env: { ...process.env, AXON_CONFIG_DIR: cfgDir, NO_COLOR: "1", AXON_ALLOW_LOCAL_FETCH: "1" } });
     let buf = "";
     child.stdout.on("data", (d) => (buf += d));
     child.stderr.on("data", (d) => (buf += d));

@@ -189,3 +189,14 @@ export function memoryBannerLine(mem: ResolvedMemory): string | null {
   const n      = mem.sources.length;
   return `${n} file${n === 1 ? "" : "s"} — ${labels}${suffix}`;
 }
+
+/**
+ * Labels of any CLAUDE.md files ingested via the compat fallback — so the REPL
+ * can tell the user a Claude-Code memory file is being trusted (it wasn't
+ * authored for AXON). Empty when only AXON.md files were used.
+ */
+export function claudeMdSources(mem: ResolvedMemory): string[] {
+  return mem.sources
+    .filter((s) => s.relLabel.toLowerCase().endsWith("claude.md"))
+    .map((s) => s.relLabel);
+}

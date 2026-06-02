@@ -7,10 +7,13 @@
  */
 
 import { promises as fs } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
 import type { ToolResult } from "./registry.js";
+import type { PermissionStore } from "../permissions.js";
+import { guardRead } from "./workspace.js";
 
 const MAX_BYTES = 32_000;
+/** Refuse to slurp a file larger than this whole into memory (OOM guard). */
+const MAX_READ_BYTES = 10 * 1024 * 1024;
 
 export interface ReadFileArgs {
   path:    string;
@@ -18,15 +21,25 @@ export interface ReadFileArgs {
   limit?:  number;
 }
 
-export async function readFile(args: ReadFileArgs): Promise<ToolResult> {
+export async function readFile(args: ReadFileArgs, perms: PermissionStore): Promise<ToolResult> {
   if (!args.path || typeof args.path !== "string") {
     return { ok: false, error: "read_file: 'path' is required" };
   }
-  const abs = isAbsolute(args.path) ? args.path : resolve(process.cwd(), args.path);
+  // Confine to the workspace — escapes prompt (non-TTY denies).
+  const guard = await guardRead(args.path, perms, "read_file");
+  if (!guard.ok) return { ok: false, error: guard.error };
+  const abs = guard.abs;
   try {
     const stat = await fs.stat(abs);
     if (stat.isDirectory()) {
       return { ok: false, error: `read_file: '${abs}' is a directory (use ls instead)` };
+    }
+    if (stat.size > MAX_READ_BYTES) {
+      return {
+        ok: false,
+        error: `read_file: '${abs}' is ${(stat.size / 1024 / 1024).toFixed(1)} MB — too large to read whole; ` +
+          `pass offset+limit to page through it.`,
+      };
     }
     let content = await fs.readFile(abs, "utf-8");
     let truncated = false;

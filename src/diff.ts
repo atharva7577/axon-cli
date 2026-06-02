@@ -137,28 +137,45 @@ export function computeUpdatedContent(originalSource: string, edit: SearchReplac
 
   const idx = normSource.indexOf(normSearch);
   if (idx !== -1) {
+    // Ambiguity guard: if the exact block occurs more than once, refuse rather
+    // than silently editing the first hit (could be the wrong location).
+    if (normSearch.length > 0 && normSource.indexOf(normSearch, idx + 1) !== -1) {
+      throw new Error(
+        `[diff] search block is ambiguous — it matches more than one location in the file. ` +
+        `Add surrounding lines so the match is unique.`,
+      );
+    }
     return normSource.slice(0, idx) + replace + normSource.slice(idx + normSearch.length);
   }
-  const normMatch = findNormalizedMatch(normSource, normSearch);
-  if (!normMatch) {
+  const normMatches = findNormalizedMatches(normSource, normSearch);
+  if (normMatches.length === 0) {
     throw new Error(
       `[diff] search block did not match (exact + whitespace-normalised both failed). ` +
       `Search head:\n${edit.search.slice(0, 200)}${edit.search.length > 200 ? "…" : ""}`,
     );
   }
+  if (normMatches.length > 1) {
+    throw new Error(
+      `[diff] search block is ambiguous — it matches ${normMatches.length} locations ` +
+      `(whitespace-normalised). Add surrounding lines so the match is unique.`,
+    );
+  }
+  const normMatch = normMatches[0]!;
   return normSource.slice(0, normMatch.startChar) + replace + normSource.slice(normMatch.endChar);
 }
 
-function findNormalizedMatch(
+/** Every whitespace-normalised location of `search` in `source` (for ambiguity detection). */
+function findNormalizedMatches(
   source: string,
   search: string,
-): { startChar: number; endChar: number } | null {
+): Array<{ startChar: number; endChar: number }> {
+  const out: Array<{ startChar: number; endChar: number }> = [];
   const srcLines = source.split("\n");
   const srcNonEmpty = srcLines
     .map((l, i) => ({ trimmed: l.trim(), origIdx: i }))
     .filter(({ trimmed }) => trimmed.length > 0);
   const searchTrimmed = search.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
-  if (searchTrimmed.length === 0 || srcNonEmpty.length < searchTrimmed.length) return null;
+  if (searchTrimmed.length === 0 || srcNonEmpty.length < searchTrimmed.length) return out;
 
   for (let i = 0; i <= srcNonEmpty.length - searchTrimmed.length; i++) {
     let matched = true;
@@ -173,9 +190,9 @@ function findNormalizedMatch(
     for (let k = 0; k < firstLineIdx; k++) startChar += srcLines[k]!.length + 1;
     let endChar = startChar;
     for (let k = firstLineIdx; k <= lastLineIdx; k++) endChar += srcLines[k]!.length + 1;
-    return { startChar, endChar: Math.min(endChar, source.length) };
+    out.push({ startChar, endChar: Math.min(endChar, source.length) });
   }
-  return null;
+  return out;
 }
 
 // ─── applyCodeEdit ───────────────────────────────────────────────────────────

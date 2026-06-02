@@ -6,8 +6,10 @@
  */
 
 import { promises as fs } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { ToolResult } from "./registry.js";
+import type { PermissionStore } from "../permissions.js";
+import { guardRead } from "./workspace.js";
 
 const DEFAULT_EXCLUDE = new Set([
   "node_modules",
@@ -21,10 +23,11 @@ export interface LsArgs {
   path?: string;
 }
 
-export async function ls(args: LsArgs): Promise<ToolResult> {
-  const target = args.path
-    ? (isAbsolute(args.path) ? args.path : resolve(process.cwd(), args.path))
-    : process.cwd();
+export async function ls(args: LsArgs, perms: PermissionStore): Promise<ToolResult> {
+  // Confine to the workspace — listing a dir outside the root prompts (non-TTY denies).
+  const guard = await guardRead(args.path ?? process.cwd(), perms, "ls");
+  if (!guard.ok) return { ok: false, error: guard.error };
+  const target = guard.abs;
 
   try {
     const entries = await fs.readdir(target, { withFileTypes: true });

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  dist-check:
+    name: committed dist/ matches a fresh build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      # The bundle is committed (so `npm i -g github:…` works without devDeps).
+      # Fail the build if src/ changed but dist/ wasn't rebuilt + committed.
+      - name: dist/ must not be stale
+        shell: bash
+        run: |
+          if ! git diff --quiet -- dist; then
+            echo "::error::dist/ is stale — run 'npm run build' and commit the result."
+            git --no-pager diff --stat -- dist
+            exit 1
+          fi

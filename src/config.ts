@@ -6,7 +6,7 @@
  * style hijack of `axon` invocations.
  */
 
-import { existsSync, chmodSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, chmodSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -41,10 +41,24 @@ export function configPath(): string {
   return join(configDir(), "config.json");
 }
 
+/**
+ * Refuse a config dir that is group/other-writable (a tempdir-style hijack of
+ * `axon` invocations). POSIX-only — Windows mode bits are synthetic, ACLs govern.
+ */
+function assertDirNotWorldWritable(dir: string): void {
+  if (process.platform === "win32") return;
+  let st;
+  try { st = statSync(dir); } catch { return; }
+  if ((st.mode & 0o022) !== 0) {
+    throw new Error(`config: ${dir} is group/other-writable — refusing to use it. Run: chmod 700 ${dir}`);
+  }
+}
+
 /** Read the config, layered over the defaults. Missing file → defaults only. */
 export function readConfig(): AxonConfig {
   const path = configPath();
   if (!existsSync(path)) return { ...DEFAULTS };
+  assertDirNotWorldWritable(configDir());
   try {
     const raw = readFileSync(path, "utf-8");
     const parsed = JSON.parse(raw) as Partial<AxonConfig>;
@@ -54,23 +68,22 @@ export function readConfig(): AxonConfig {
   }
 }
 
-/** Write the config atomically (tmp → rename) and chmod 600. */
+/** Write the config atomically (tmp → fsync-less rename) and chmod 600. */
 export function writeConfig(next: AxonConfig): void {
   const dir = configDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  assertDirNotWorldWritable(dir);
   const path = configPath();
   const tmp  = `${path}.tmp`;
   const payload: AxonConfig = { ...next, updatedAt: new Date().toISOString() };
-  writeFileSync(tmp, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
-  // chmod is a best-effort no-op on Windows but matters on POSIX hosts.
-  try { chmodSync(tmp, 0o600); } catch { /* windows */ }
-  // Atomic replace.
-  try { unlinkSync(path); } catch { /* file may not exist */ }
-  // Use rename via writeFileSync rather than fs.renameSync to keep imports tidy.
-  // Re-write to the final path and remove the tmp.
-  writeFileSync(path, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
-  try { chmodSync(path, 0o600); } catch { /* windows */ }
-  try { unlinkSync(tmp); } catch { /* tmp already gone */ }
+  const json = JSON.stringify(payload, null, 2) + "\n";
+  // Write the tmp with restrictive perms, then atomically replace the target.
+  // A single rename() means a crash leaves EITHER the old file OR the new one —
+  // never a truncated/absent config (the old unlink-then-rewrite could lose it).
+  writeFileSync(tmp, json, { mode: 0o600 });
+  try { chmodSync(tmp, 0o600); } catch { /* no-op on win32 */ }
+  renameSync(tmp, path); // POSIX rename() / win32 MoveFileEx — atomic, overwrites.
+  try { chmodSync(path, 0o600); } catch { /* no-op on win32 */ }
 }
 
 /** Persist a partial patch. Pass `apiKey: undefined` to clear it on logout. */

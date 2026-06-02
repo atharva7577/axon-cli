@@ -67,10 +67,10 @@ export async function dispatchTool(call: ToolCall, perms: PermissionStore): Prom
   console.log(chalk.dim(`  ⏵ ${summarizeToolCall({ ...call, arguments: JSON.stringify(args) })}`));
 
   switch (call.name) {
-    case "read_file":  return readFile(args as unknown as ReadFileArgs);
-    case "glob":       return glob(args as unknown as GlobArgs);
-    case "grep":       return grep(args as unknown as GrepArgs);
-    case "ls":         return ls(args as unknown as LsArgs);
+    case "read_file":  return readFile(args as unknown as ReadFileArgs, perms);
+    case "glob":       return glob(args as unknown as GlobArgs, perms);
+    case "grep":       return grep(args as unknown as GrepArgs, perms);
+    case "ls":         return ls(args as unknown as LsArgs, perms);
     case "bash":       return bash(args as unknown as BashArgs, perms);
     case "write_file": return writeFile(args as unknown as WriteFileArgs, perms);
     case "edit_file":  return editFile(args as unknown as EditFileArgs, perms);

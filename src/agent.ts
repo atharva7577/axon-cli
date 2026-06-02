@@ -20,6 +20,9 @@ import { ALL_TOOLS } from "./tools/schemas.js";
 import { dispatchTool, type ToolCall, type ToolResult } from "./tools/registry.js";
 import { PermissionStore } from "./permissions.js";
 
+/** Per-call ceiling on accumulated tool-call arguments (OOM / runaway-stream guard). */
+const MAX_TOOL_ARGS_BYTES = 256_000;
+
 export interface ChatMessage {
   role:           "system" | "user" | "assistant" | "tool";
   content:        string | null;
@@ -87,7 +90,7 @@ async function consumeStream(
 
   let content = "";
   let final: SseFinalChunk | null = null;
-  const toolBuffers = new Map<number, { id?: string; name?: string; args: string }>();
+  const toolBuffers = new Map<number, { id?: string; name?: string; args: string; overflow?: boolean }>();
 
   for await (const ev of stream) {
     if (ev.type === "delta") {
@@ -96,9 +99,16 @@ async function consumeStream(
     } else if (ev.type === "tool_call_delta") {
       const idx = ev.delta.index;
       const cur = toolBuffers.get(idx) ?? { args: "" };
-      if (ev.delta.id)             cur.id   = ev.delta.id;
-      if (ev.delta.name)           cur.name = ev.delta.name;
-      if (ev.delta.argumentsDelta) cur.args = (cur.args ?? "") + ev.delta.argumentsDelta;
+      if (ev.delta.id)   cur.id   = ev.delta.id;
+      if (ev.delta.name) cur.name = ev.delta.name;
+      // Cap accumulation so a buggy/malicious backend can't grow args unbounded.
+      if (ev.delta.argumentsDelta && !cur.overflow) {
+        if (cur.args.length + ev.delta.argumentsDelta.length > MAX_TOOL_ARGS_BYTES) {
+          cur.overflow = true; // stop growing; surfaced as a clean parse error below
+        } else {
+          cur.args += ev.delta.argumentsDelta;
+        }
+      }
       toolBuffers.set(idx, cur);
     } else if (ev.type === "done") {
       final = ev.final;
@@ -111,7 +121,7 @@ async function consumeStream(
     return {
       id:        buf.id ?? `call_${i}`,
       name:      buf.name ?? "",
-      arguments: buf.args ?? "",
+      arguments: buf.overflow ? "[oversized: tool arguments exceeded the 256 KB limit]" : (buf.args ?? ""),
     };
   }).filter((c) => c.name); // drop empty/stale slots
 

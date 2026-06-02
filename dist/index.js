@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/index.ts
-import chalk14 from "chalk";
+import chalk16 from "chalk";
 import { Command } from "commander";
 
 // src/commands/login.ts
@@ -9,7 +9,7 @@ import chalk from "chalk";
 import ora from "ora";
 
 // src/config.ts
-import { existsSync, chmodSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
+import { existsSync, chmodSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 var DEFAULTS = {
@@ -23,9 +23,22 @@ function configDir() {
 function configPath() {
   return join(configDir(), "config.json");
 }
+function assertDirNotWorldWritable(dir) {
+  if (process.platform === "win32") return;
+  let st;
+  try {
+    st = statSync(dir);
+  } catch {
+    return;
+  }
+  if ((st.mode & 18) !== 0) {
+    throw new Error(`config: ${dir} is group/other-writable \u2014 refusing to use it. Run: chmod 700 ${dir}`);
+  }
+}
 function readConfig() {
   const path = configPath();
   if (!existsSync(path)) return { ...DEFAULTS };
+  assertDirNotWorldWritable(configDir());
   try {
     const raw = readFileSync(path, "utf-8");
     const parsed = JSON.parse(raw);
@@ -37,25 +50,19 @@ function readConfig() {
 function writeConfig(next) {
   const dir = configDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 448 });
+  assertDirNotWorldWritable(dir);
   const path = configPath();
   const tmp = `${path}.tmp`;
   const payload = { ...next, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
-  writeFileSync(tmp, JSON.stringify(payload, null, 2) + "\n", { mode: 384 });
+  const json = JSON.stringify(payload, null, 2) + "\n";
+  writeFileSync(tmp, json, { mode: 384 });
   try {
     chmodSync(tmp, 384);
   } catch {
   }
-  try {
-    unlinkSync(path);
-  } catch {
-  }
-  writeFileSync(path, JSON.stringify(payload, null, 2) + "\n", { mode: 384 });
+  renameSync(tmp, path);
   try {
     chmodSync(path, 384);
-  } catch {
-  }
-  try {
-    unlinkSync(tmp);
   } catch {
   }
 }
@@ -95,6 +102,21 @@ var AxonBackendError = class extends Error {
 function trimBase(base) {
   return base.replace(/\/+$/, "");
 }
+function assertSecureBase(base) {
+  let u;
+  try {
+    u = new URL(base);
+  } catch {
+    throw new Error(`invalid apiBase: '${base}'`);
+  }
+  if (u.protocol === "https:") return;
+  const host = u.hostname.replace(/\.$/, "").toLowerCase();
+  const localOk = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  if (u.protocol === "http:" && (localOk || process.env.AXON_ALLOW_INSECURE === "1")) return;
+  throw new Error(
+    `refusing to use a non-HTTPS backend (${base}). The API key would travel in clear text. Use https://, or set AXON_ALLOW_INSECURE=1 for a trusted local dev backend.`
+  );
+}
 function buildHeaders(cfg, opts) {
   const h = {
     "Content-Type": "application/json",
@@ -132,6 +154,7 @@ function toBackendError(status, body) {
 async function send(method, path, body, opts) {
   const cfg = opts.cfg ?? readConfig();
   const base = trimBase(cfg.apiBase);
+  assertSecureBase(base);
   const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
   const headers = buildHeaders(cfg, opts);
   const ctl = new AbortController();
@@ -289,14 +312,20 @@ async function runHeadlessKeyFlow(apiBase, apiKey) {
     return;
   }
   spinner.succeed("Verified.");
+  const previous = readConfig();
   patchConfig({ apiBase, apiKey });
   console.log(chalk.green(`  \u2713 Logged in. Key ${maskKey(apiKey)} saved to ${chalk.dim("~/.axon/config.json")}.`));
+  if (previous.telemetry !== false) {
+    console.log("");
+    console.log(chalk.dim(TELEMETRY_NOTICE));
+  }
 }
 function registerLogin(program2) {
   program2.command("login").description("Authenticate the CLI with the AXON backend.").option("-k, --key <axon_key>", "Paste an existing AXON API key (skip device-code flow).").option("-b, --base <url>", "Override the AXON backend base URL.", "").option("--no-browser", "Do not auto-open the browser. Useful in SSH/headless shells.").action(async (opts) => {
     const cfg = readConfig();
     const apiBase = opts.base?.trim() || cfg.apiBase;
     try {
+      assertSecureBase(apiBase);
       if (opts.key && opts.key.trim()) {
         await runHeadlessKeyFlow(apiBase, opts.key.trim());
       } else {
@@ -502,6 +531,15 @@ function registerConfig(program2) {
       process.exitCode = 1;
       return;
     }
+    if (key === "apiBase" && typeof parsed === "string") {
+      try {
+        assertSecureBase(parsed);
+      } catch (err) {
+        console.error(chalk5.red(`\u2717 ${err.message}`));
+        process.exitCode = 1;
+        return;
+      }
+    }
     patchConfig({ [key]: parsed });
     console.log(chalk5.green("\u2713") + ` ${key} updated.`);
   });
@@ -519,12 +557,14 @@ function registerConfig(program2) {
 }
 
 // src/commands/chat.ts
-import chalk10 from "chalk";
+import chalk12 from "chalk";
 
 // src/sse.ts
+var MAX_SSE_BUFFER = 1e6;
 async function* streamChat(body, options) {
   const cfg = readConfig();
   const apiBase = (options.apiBase || cfg.apiBase).replace(/\/+$/, "");
+  assertSecureBase(apiBase);
   const headers = {
     "Content-Type": "application/json",
     "Accept": "text/event-stream",
@@ -585,6 +625,9 @@ async function* streamChat(body, options) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > MAX_SSE_BUFFER) {
+        throw new Error("SSE buffer exceeded \u2014 malformed stream (no event boundary within 1 MB)");
+      }
       let boundary;
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
         const eventBlock = buffer.slice(0, boundary);
@@ -637,7 +680,7 @@ async function* streamChat(body, options) {
 }
 
 // src/agent.ts
-import chalk8 from "chalk";
+import chalk10 from "chalk";
 
 // src/tools/schemas.ts
 var READ_FILE = {
@@ -772,21 +815,93 @@ var ALL_TOOLS = [
 ];
 
 // src/tools/registry.ts
-import chalk7 from "chalk";
+import chalk9 from "chalk";
 
 // src/tools/read.ts
 import { promises as fs } from "fs";
-import { isAbsolute, resolve } from "path";
+
+// src/tools/workspace.ts
+import { existsSync as existsSync2, realpathSync } from "fs";
+import { dirname, isAbsolute, join as join2, relative, resolve } from "path";
+var MAX_WALK_DEPTH = 50;
+function findGitRoot(start) {
+  let dir = start;
+  for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
+    if (existsSync2(join2(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+var cached = null;
+function workspaceRoot(cwd = process.cwd()) {
+  if (cached && cached.cwd === cwd) return cached.root;
+  const root = canonicalize(findGitRoot(cwd) ?? cwd);
+  cached = { cwd, root };
+  return root;
+}
+function canonicalize(rawPath) {
+  const abs = isAbsolute(rawPath) ? rawPath : resolve(process.cwd(), rawPath);
+  let head = abs;
+  const tail = [];
+  while (!existsSync2(head)) {
+    const parent = dirname(head);
+    if (parent === head) break;
+    tail.unshift(head.slice(parent.length + 1));
+    head = parent;
+  }
+  let realHead;
+  try {
+    realHead = realpathSync(head);
+  } catch {
+    realHead = head;
+  }
+  return tail.length ? join2(realHead, ...tail) : realHead;
+}
+function isInsideRoot(absCanonical, root = workspaceRoot()) {
+  if (absCanonical === root) return true;
+  const rel = relative(root, absCanonical);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+async function guardRead(rawPath, perms, label = "read") {
+  const abs = canonicalize(rawPath);
+  if (isInsideRoot(abs)) return { ok: true, abs };
+  const decision = await perms.request({
+    tool: "read_outside",
+    key: abs,
+    summary: `${label} OUTSIDE workspace: ${abs}`
+  });
+  if (decision === "deny") {
+    return { ok: false, error: `${label}: '${abs}' is outside the workspace and permission was denied` };
+  }
+  return { ok: true, abs };
+}
+function classifyWrite(rawPath) {
+  const abs = canonicalize(rawPath);
+  return { abs, outside: !isInsideRoot(abs) };
+}
+
+// src/tools/read.ts
 var MAX_BYTES = 32e3;
-async function readFile(args) {
+var MAX_READ_BYTES = 10 * 1024 * 1024;
+async function readFile(args, perms) {
   if (!args.path || typeof args.path !== "string") {
     return { ok: false, error: "read_file: 'path' is required" };
   }
-  const abs = isAbsolute(args.path) ? args.path : resolve(process.cwd(), args.path);
+  const guard = await guardRead(args.path, perms, "read_file");
+  if (!guard.ok) return { ok: false, error: guard.error };
+  const abs = guard.abs;
   try {
     const stat = await fs.stat(abs);
     if (stat.isDirectory()) {
       return { ok: false, error: `read_file: '${abs}' is a directory (use ls instead)` };
+    }
+    if (stat.size > MAX_READ_BYTES) {
+      return {
+        ok: false,
+        error: `read_file: '${abs}' is ${(stat.size / 1024 / 1024).toFixed(1)} MB \u2014 too large to read whole; pass offset+limit to page through it.`
+      };
     }
     let content = await fs.readFile(abs, "utf-8");
     let truncated = false;
@@ -823,19 +938,29 @@ var DEFAULT_EXCLUDE = [
   ".turbo",
   ".cache"
 ];
-async function glob(args) {
+async function glob(args, perms) {
   if (!args.pattern || typeof args.pattern !== "string") {
     return { ok: false, error: "glob: 'pattern' is required" };
   }
-  const cwd = args.cwd ? isAbsolute2(args.cwd) ? args.cwd : resolve2(process.cwd(), args.cwd) : process.cwd();
+  const guard = await guardRead(args.cwd ?? process.cwd(), perms, "glob");
+  if (!guard.ok) return { ok: false, error: guard.error };
+  const cwd = guard.abs;
+  const effectiveRoot = isInsideRoot(cwd) ? workspaceRoot() : cwd;
   try {
+    let outsideDropped = 0;
     const matches = [];
     const iter = fspGlob(args.pattern, {
       cwd,
       exclude: (p) => DEFAULT_EXCLUDE.some((d) => p.includes(`/${d}/`) || p.startsWith(`${d}/`) || p === d)
     });
     for await (const m of iter) {
-      matches.push(m);
+      const rel = m;
+      const abs = isAbsolute2(rel) ? rel : resolve2(cwd, rel);
+      if (!isInsideRoot(abs, effectiveRoot)) {
+        outsideDropped++;
+        continue;
+      }
+      matches.push(rel);
       if (matches.length >= MAX_RESULTS * 2) break;
     }
     const stamped = await Promise.all(
@@ -852,10 +977,12 @@ async function glob(args) {
     stamped.sort((a, b) => b.mtime - a.mtime);
     const truncated = stamped.length > MAX_RESULTS;
     const out = stamped.slice(0, MAX_RESULTS).map((s) => s.path).join("\n") || "(no matches)";
+    const note = outsideDropped > 0 ? `
+(${outsideDropped} match${outsideDropped === 1 ? "" : "es"} outside the workspace omitted)` : "";
     return {
       ok: true,
       result: `cwd: ${cwd}
-${out}`,
+${out}${note}`,
       truncated
     };
   } catch (err) {
@@ -879,7 +1006,7 @@ var DEFAULT_EXCLUDE2 = [
   ".turbo",
   ".cache"
 ];
-async function grep(args) {
+async function grep(args, _perms) {
   if (!args.pattern || typeof args.pattern !== "string") {
     return { ok: false, error: "grep: 'pattern' is required" };
   }
@@ -910,6 +1037,7 @@ async function grep(args) {
         break;
       }
       const abs = isAbsolute3(rel) ? rel : resolve3(cwd, rel);
+      if (!isInsideRoot(canonicalize(abs))) continue;
       try {
         const stat = await fsp2.stat(abs);
         if (!stat.isFile()) continue;
@@ -943,7 +1071,7 @@ ${results.join("\n")}` : `(no matches across ${scanned} file${scanned === 1 ? ""
 
 // src/tools/ls.ts
 import { promises as fs2 } from "fs";
-import { isAbsolute as isAbsolute4, resolve as resolve4 } from "path";
+import { resolve as resolve4 } from "path";
 var DEFAULT_EXCLUDE3 = /* @__PURE__ */ new Set([
   "node_modules",
   ".git",
@@ -951,8 +1079,10 @@ var DEFAULT_EXCLUDE3 = /* @__PURE__ */ new Set([
   ".turbo",
   ".cache"
 ]);
-async function ls(args) {
-  const target = args.path ? isAbsolute4(args.path) ? args.path : resolve4(process.cwd(), args.path) : process.cwd();
+async function ls(args, perms) {
+  const guard = await guardRead(args.path ?? process.cwd(), perms, "ls");
+  if (!guard.ok) return { ok: false, error: guard.error };
+  const target = guard.abs;
   try {
     const entries = await fs2.readdir(target, { withFileTypes: true });
     const rows = [];
@@ -986,14 +1116,14 @@ ${rows.join("\n")}` : `(empty: ${target})`
 import { spawn as spawn2 } from "child_process";
 
 // src/tools/permKey.ts
-import { relative, isAbsolute as isAbsolute5, resolve as resolve5 } from "path";
+import { relative as relative2, isAbsolute as isAbsolute4, resolve as resolve5 } from "path";
 function commandPermissionKey(cmd) {
   const norm = cmd.trim().replace(/\s+/g, " ");
   return norm || "(empty)";
 }
 function filePermissionKey(pathArg) {
-  const abs = isAbsolute5(pathArg) ? pathArg : resolve5(process.cwd(), pathArg);
-  const rel = relative(process.cwd(), abs);
+  const abs = isAbsolute4(pathArg) ? pathArg : resolve5(process.cwd(), pathArg);
+  const rel = relative2(process.cwd(), abs);
   return (rel || abs).replace(/\\/g, "/");
 }
 
@@ -1005,10 +1135,12 @@ async function bash(args, perms) {
     return { ok: false, error: "bash: 'command' is required" };
   }
   const key = commandPermissionKey(args.command);
+  const multiline = args.command.includes("\n");
   const decision = await perms.request({
     tool: "bash",
     key,
-    summary: `$ ${args.command.length > 200 ? args.command.slice(0, 200) + "\u2026" : args.command}`
+    summary: multiline ? `$ (full command):
+${args.command}` : `$ ${args.command}`
   });
   if (decision === "deny") {
     return { ok: false, error: "bash: user denied permission" };
@@ -1017,7 +1149,7 @@ async function bash(args, perms) {
   const isWin = process.platform === "win32";
   const shell = isWin ? "cmd.exe" : "/bin/sh";
   const flag = isWin ? "/c" : "-c";
-  return new Promise((resolve10) => {
+  return new Promise((resolve8) => {
     let stdout = "";
     let stderr = "";
     let killed = false;
@@ -1037,7 +1169,7 @@ async function bash(args, perms) {
     });
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve10({ ok: false, error: `bash spawn failed: ${err.message}` });
+      resolve8({ ok: false, error: `bash spawn failed: ${err.message}` });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -1057,7 +1189,7 @@ ${stdout}` : "stdout: (empty)",
         stderr ? `stderr:
 ${stderr}` : "stderr: (empty)"
       ].join("\n");
-      resolve10({
+      resolve8({
         ok: !killed && code === 0,
         result: body,
         error: killed ? "bash: timed out" : code !== 0 ? `bash: exit ${code}` : void 0,
@@ -1068,8 +1200,9 @@ ${stderr}` : "stderr: (empty)"
 }
 
 // src/tools/write.ts
+import chalk6 from "chalk";
 import { promises as fs3 } from "fs";
-import { dirname, isAbsolute as isAbsolute6, relative as relative2, resolve as resolve6 } from "path";
+import { dirname as dirname2, relative as relative3 } from "path";
 var MAX_BYTES2 = 1e6;
 async function writeFile(args, perms) {
   if (!args.path || typeof args.path !== "string") {
@@ -1081,7 +1214,7 @@ async function writeFile(args, perms) {
   if (args.content.length > MAX_BYTES2) {
     return { ok: false, error: `write_file: content exceeds ${MAX_BYTES2} bytes \u2014 split into multiple calls or use edit_file` };
   }
-  const abs = isAbsolute6(args.path) ? args.path : resolve6(process.cwd(), args.path);
+  const { abs, outside } = classifyWrite(args.path);
   const key = filePermissionKey(abs);
   let exists = false;
   try {
@@ -1092,16 +1225,17 @@ async function writeFile(args, perms) {
   }
   const verb = exists ? "overwrite" : "create";
   const sizeKB = (args.content.length / 1024).toFixed(1);
+  const where = outside ? `${chalk6.red("\u26A0 OUTSIDE WORKSPACE")} ${abs}` : relative3(process.cwd(), abs);
   const decision = await perms.request({
     tool: "write_file",
     key,
-    summary: `${verb} ${relative2(process.cwd(), abs)}  (${sizeKB} KB)`
+    summary: `${verb} ${where}  (${sizeKB} KB)`
   });
   if (decision === "deny") {
     return { ok: false, error: "write_file: user denied permission" };
   }
   try {
-    await fs3.mkdir(dirname(abs), { recursive: true });
+    await fs3.mkdir(dirname2(abs), { recursive: true });
     await fs3.writeFile(abs, args.content, "utf-8");
     return {
       ok: true,
@@ -1113,12 +1247,13 @@ async function writeFile(args, perms) {
 }
 
 // src/tools/edit.ts
+import chalk8 from "chalk";
 import { promises as fs5 } from "fs";
-import { isAbsolute as isAbsolute8, relative as relative3, resolve as resolve8 } from "path";
+import { relative as relative4 } from "path";
 
 // src/diff.ts
-import { existsSync as existsSync2, promises as fs4 } from "fs";
-import { dirname as dirname2, isAbsolute as isAbsolute7, resolve as resolve7 } from "path";
+import { existsSync as existsSync3, promises as fs4 } from "fs";
+import { dirname as dirname3, isAbsolute as isAbsolute5, resolve as resolve6 } from "path";
 var PLACEHOLDER_PATTERNS = ["...", "// rest of code", "/* rest of code */"];
 function validateSearchReplace(edit) {
   if (edit.search.includes("...")) {
@@ -1137,10 +1272,10 @@ function validateAppliedContent(original, updated) {
   }
   return { valid: true };
 }
-function resolveFilePath(filePath, workspaceRoot) {
+function resolveFilePath(filePath, workspaceRoot2) {
   const cleaned = filePath.replace(/^file:\/\//i, "").trim();
-  const root = workspaceRoot ?? process.cwd();
-  const abs = isAbsolute7(cleaned) ? cleaned : resolve7(root, cleaned);
+  const root = workspaceRoot2 ?? process.cwd();
+  const abs = isAbsolute5(cleaned) ? cleaned : resolve6(root, cleaned);
   if (/file:[/\\]/i.test(abs)) {
     throw new Error(`[diff] resolved path "${abs}" contains a nested file:// scheme \u2014 refusing to write.`);
   }
@@ -1152,22 +1287,34 @@ function computeUpdatedContent(originalSource, edit) {
   const replace = edit.replace.replace(/\r\n/g, "\n");
   const idx = normSource.indexOf(normSearch);
   if (idx !== -1) {
+    if (normSearch.length > 0 && normSource.indexOf(normSearch, idx + 1) !== -1) {
+      throw new Error(
+        `[diff] search block is ambiguous \u2014 it matches more than one location in the file. Add surrounding lines so the match is unique.`
+      );
+    }
     return normSource.slice(0, idx) + replace + normSource.slice(idx + normSearch.length);
   }
-  const normMatch = findNormalizedMatch(normSource, normSearch);
-  if (!normMatch) {
+  const normMatches = findNormalizedMatches(normSource, normSearch);
+  if (normMatches.length === 0) {
     throw new Error(
       `[diff] search block did not match (exact + whitespace-normalised both failed). Search head:
 ${edit.search.slice(0, 200)}${edit.search.length > 200 ? "\u2026" : ""}`
     );
   }
+  if (normMatches.length > 1) {
+    throw new Error(
+      `[diff] search block is ambiguous \u2014 it matches ${normMatches.length} locations (whitespace-normalised). Add surrounding lines so the match is unique.`
+    );
+  }
+  const normMatch = normMatches[0];
   return normSource.slice(0, normMatch.startChar) + replace + normSource.slice(normMatch.endChar);
 }
-function findNormalizedMatch(source, search) {
+function findNormalizedMatches(source, search) {
+  const out = [];
   const srcLines = source.split("\n");
   const srcNonEmpty = srcLines.map((l, i) => ({ trimmed: l.trim(), origIdx: i })).filter(({ trimmed }) => trimmed.length > 0);
   const searchTrimmed = search.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
-  if (searchTrimmed.length === 0 || srcNonEmpty.length < searchTrimmed.length) return null;
+  if (searchTrimmed.length === 0 || srcNonEmpty.length < searchTrimmed.length) return out;
   for (let i = 0; i <= srcNonEmpty.length - searchTrimmed.length; i++) {
     let matched = true;
     for (let j = 0; j < searchTrimmed.length; j++) {
@@ -1183,11 +1330,11 @@ function findNormalizedMatch(source, search) {
     for (let k = 0; k < firstLineIdx; k++) startChar += srcLines[k].length + 1;
     let endChar = startChar;
     for (let k = firstLineIdx; k <= lastLineIdx; k++) endChar += srcLines[k].length + 1;
-    return { startChar, endChar: Math.min(endChar, source.length) };
+    out.push({ startChar, endChar: Math.min(endChar, source.length) });
   }
-  return null;
+  return out;
 }
-async function applyCodeEdit(payload, workspaceRoot) {
+async function applyCodeEdit(payload, workspaceRoot2) {
   if (!payload.filePath || payload.filePath.trim() === "") {
     throw new Error("[diff] cannot apply edit: filePath is missing from the backend response.");
   }
@@ -1195,12 +1342,12 @@ async function applyCodeEdit(payload, workspaceRoot) {
     if (!payload.explicit) {
       throw new Error("[diff] full-file overwrite blocked \u2014 must be explicitly requested.");
     }
-    return writeFullFile(resolveFilePath(payload.filePath, workspaceRoot), payload.newContent);
+    return writeFullFile(resolveFilePath(payload.filePath, workspaceRoot2), payload.newContent);
   }
   const pre = validateSearchReplace(payload);
   if (!pre.valid) throw new Error(`[diff] ${pre.reason}`);
-  const abs = resolveFilePath(payload.filePath, workspaceRoot);
-  const exists = existsSync2(abs);
+  const abs = resolveFilePath(payload.filePath, workspaceRoot2);
+  const exists = existsSync3(abs);
   if (!exists) {
     throw new Error(`[diff] target file does not exist: ${abs}`);
   }
@@ -1212,12 +1359,12 @@ async function applyCodeEdit(payload, workspaceRoot) {
   return { filePath: abs, originalContent: source, updatedContent: updated, wasNewFile: false };
 }
 async function writeFullFile(abs, content) {
-  const wasNewFile = !existsSync2(abs);
+  const wasNewFile = !existsSync3(abs);
   let originalContent = "";
   if (!wasNewFile) {
     originalContent = await fs4.readFile(abs, "utf-8");
   } else {
-    await fs4.mkdir(dirname2(abs), { recursive: true });
+    await fs4.mkdir(dirname3(abs), { recursive: true });
   }
   await fs4.writeFile(abs, content, "utf-8");
   return { filePath: abs, originalContent, updatedContent: content, wasNewFile };
@@ -1234,7 +1381,7 @@ async function revertAppliedEdit(applied) {
 }
 
 // src/render.ts
-import chalk6 from "chalk";
+import chalk7 from "chalk";
 import { structuredPatch } from "diff";
 var CONTEXT_LINES = 3;
 function renderUnifiedDiff(original, updated, header) {
@@ -1250,29 +1397,30 @@ function renderUnifiedDiff(original, updated, header) {
   const lines = [];
   if (header?.filePath || header?.subject) {
     const title = header?.filePath ?? header?.subject ?? "";
-    lines.push(chalk6.bold.cyan(`\u2500\u2500\u2500\u2500 ${title} \u2500\u2500\u2500\u2500`));
+    lines.push(chalk7.bold.cyan(`\u2500\u2500\u2500\u2500 ${title} \u2500\u2500\u2500\u2500`));
   }
   for (const hunk of patch.hunks) {
     lines.push(formatHunkHeader(hunk));
     for (const ln of hunk.lines) {
       const ch = ln[0];
       const body = ln.slice(1);
-      if (ch === "+") lines.push(chalk6.green(`+ ${body}`));
-      else if (ch === "-") lines.push(chalk6.red(`- ${body}`));
-      else if (ch === "\\") lines.push(chalk6.dim(`  ${body}`));
-      else lines.push(chalk6.dim(`  ${body}`));
+      if (ch === "+") lines.push(chalk7.green(`+ ${body}`));
+      else if (ch === "-") lines.push(chalk7.red(`- ${body}`));
+      else if (ch === "\\") lines.push(chalk7.dim(`  ${body}`));
+      else lines.push(chalk7.dim(`  ${body}`));
     }
   }
-  if (lines.length === 0) lines.push(chalk6.dim("(no changes)"));
+  if (lines.length === 0) lines.push(chalk7.dim("(no changes)"));
   return lines.join("\n");
 }
 function formatHunkHeader(hunk) {
-  return chalk6.cyan(
+  return chalk7.cyan(
     `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`
   );
 }
 
 // src/tools/edit.ts
+var MAX_EDIT_BYTES = 10 * 1024 * 1024;
 async function editFile(args, perms) {
   if (!args.path || typeof args.path !== "string") {
     return { ok: false, error: "edit_file: 'path' is required" };
@@ -1280,9 +1428,13 @@ async function editFile(args, perms) {
   if (typeof args.old !== "string" || typeof args.new !== "string") {
     return { ok: false, error: "edit_file: 'old' and 'new' must be strings" };
   }
-  const abs = isAbsolute8(args.path) ? args.path : resolve8(process.cwd(), args.path);
+  const { abs, outside } = classifyWrite(args.path);
   let original;
   try {
+    const stat = await fs5.stat(abs);
+    if (stat.size > MAX_EDIT_BYTES) {
+      return { ok: false, error: `edit_file: '${abs}' is ${(stat.size / 1024 / 1024).toFixed(1)} MB \u2014 too large to edit in memory` };
+    }
     original = await fs5.readFile(abs, "utf-8");
   } catch (err) {
     return { ok: false, error: `edit_file: cannot read ${abs}: ${err.message}` };
@@ -1301,11 +1453,11 @@ async function editFile(args, perms) {
   if (!post.valid) {
     return { ok: false, error: `edit_file: ${post.reason}` };
   }
-  const diff = renderUnifiedDiff(original, updated, { filePath: relative3(process.cwd(), abs) });
+  const diff = renderUnifiedDiff(original, updated, { filePath: relative4(process.cwd(), abs) });
   const decision = await perms.request({
     tool: "edit_file",
     key: filePermissionKey(abs),
-    summary: `edit ${relative3(process.cwd(), abs)}`,
+    summary: outside ? `edit ${chalk8.red("\u26A0 OUTSIDE WORKSPACE")} ${abs}` : `edit ${relative4(process.cwd(), abs)}`,
     detail: diff
   });
   if (decision === "deny") {
@@ -1323,8 +1475,66 @@ async function editFile(args, perms) {
 }
 
 // src/tools/webfetch.ts
+import { lookup } from "dns/promises";
+import { isIP } from "net";
 var MAX_BYTES3 = 32e3;
 var FETCH_TIMEOUT_MS = 2e4;
+var MAX_REDIRECTS = 5;
+function ipv4IsBlocked(ip) {
+  const p = ip.split(".").map(Number);
+  if (p.length !== 4 || p.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return true;
+  const [a, b, c, d] = p;
+  if (a === 0) return true;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 255 && b === 255 && c === 255 && d === 255) return true;
+  return false;
+}
+function isBlockedAddress(ip) {
+  const kind = isIP(ip);
+  if (kind === 4) return ipv4IsBlocked(ip);
+  if (kind === 6) {
+    const lower = ip.toLowerCase();
+    if (lower === "::1" || lower === "::") return true;
+    const mapped = lower.match(/(?:::ffff:)(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return ipv4IsBlocked(mapped[1]);
+    const first = parseInt(lower.split(":")[0] || "0", 16);
+    if ((first & 65024) === 64512) return true;
+    if ((first & 65472) === 65152) return true;
+    return false;
+  }
+  return true;
+}
+function normHost(url) {
+  return url.hostname.replace(/\.$/, "").toLowerCase();
+}
+async function checkUrlAllowed(url, allowLocal) {
+  if (url.username || url.password) {
+    return "URLs with embedded credentials (user:pass@host) are not allowed";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return `only http/https allowed (got ${url.protocol})`;
+  }
+  if (allowLocal) return null;
+  const host = normHost(url);
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    return "refusing to fetch localhost (SSRF guard; set AXON_ALLOW_LOCAL_FETCH=1 to override)";
+  }
+  try {
+    const addrs = await lookup(host, { all: true });
+    const bad = addrs.find((a) => isBlockedAddress(a.address));
+    if (bad) {
+      return `refusing to fetch a private/loopback/link-local address (${host} \u2192 ${bad.address}) \u2014 SSRF guard; set AXON_ALLOW_LOCAL_FETCH=1 to override`;
+    }
+  } catch (err) {
+    return `cannot resolve host '${host}': ${err.message}`;
+  }
+  return null;
+}
 async function webFetch(args, perms) {
   if (!args.url || typeof args.url !== "string") {
     return { ok: false, error: "web_fetch: 'url' is required" };
@@ -1335,43 +1545,64 @@ async function webFetch(args, perms) {
   } catch {
     return { ok: false, error: `web_fetch: invalid URL '${args.url}'` };
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    return { ok: false, error: `web_fetch: only http/https allowed (got ${url.protocol})` };
-  }
+  const allowLocal = process.env.AXON_ALLOW_LOCAL_FETCH === "1";
+  const initialErr = await checkUrlAllowed(url, allowLocal);
+  if (initialErr) return { ok: false, error: `web_fetch: ${initialErr}` };
   const decision = await perms.request({
     tool: "web_fetch",
-    key: url.hostname,
-    summary: `GET ${url.toString()}`
+    key: normHost(url),
+    // origin+pathname+search excludes any userinfo (rejected above) and stays readable.
+    summary: `GET ${url.origin}${url.pathname}${url.search}`
   });
   if (decision === "deny") {
     return { ok: false, error: "web_fetch: user denied permission" };
   }
+  let current = url;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url.toString(), {
-      method: "GET",
-      headers: { "User-Agent": `axon-cli/${process.env.npm_package_version ?? "dev"}` },
-      signal: ctl.signal
-    });
-    clearTimeout(timer);
-    const status = `${res.status} ${res.statusText}`;
-    const ct = res.headers.get("content-type") ?? "";
-    let body = await res.text();
-    let truncated = false;
-    if (body.length > MAX_BYTES3) {
-      body = body.slice(0, MAX_BYTES3) + "\n\u2026 [truncated]";
-      truncated = true;
-    }
-    return {
-      ok: res.ok,
-      result: `HTTP ${status}
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      const res = await fetch(current.toString(), {
+        method: "GET",
+        headers: { "User-Agent": `axon-cli/${process.env.npm_package_version ?? "dev"}` },
+        signal: ctl.signal,
+        redirect: "manual"
+      });
+      if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+        if (hop === MAX_REDIRECTS) {
+          clearTimeout(timer);
+          return { ok: false, error: `web_fetch: too many redirects (>${MAX_REDIRECTS})` };
+        }
+        const next = new URL(res.headers.get("location"), current);
+        const hopErr = await checkUrlAllowed(next, allowLocal);
+        if (hopErr) {
+          clearTimeout(timer);
+          return { ok: false, error: `web_fetch: redirect to a disallowed URL \u2014 ${hopErr}` };
+        }
+        current = next;
+        continue;
+      }
+      clearTimeout(timer);
+      const status = `${res.status} ${res.statusText}`;
+      const ct = res.headers.get("content-type") ?? "";
+      let body = await res.text();
+      let truncated = false;
+      if (body.length > MAX_BYTES3) {
+        body = body.slice(0, MAX_BYTES3) + "\n\u2026 [truncated]";
+        truncated = true;
+      }
+      return {
+        ok: res.ok,
+        result: `HTTP ${status}
 Content-Type: ${ct}
 
 ${body}`,
-      truncated,
-      error: res.ok ? void 0 : `web_fetch: HTTP ${status}`
-    };
+        truncated,
+        error: res.ok ? void 0 : `web_fetch: HTTP ${status}`
+      };
+    }
+    clearTimeout(timer);
+    return { ok: false, error: `web_fetch: too many redirects (>${MAX_REDIRECTS})` };
   } catch (err) {
     clearTimeout(timer);
     return { ok: false, error: `web_fetch: ${err.message}` };
@@ -1419,16 +1650,16 @@ async function dispatchTool(call, perms) {
 args: ${call.arguments}` };
   }
   console.log("");
-  console.log(chalk7.dim(`  \u23F5 ${summarizeToolCall({ ...call, arguments: JSON.stringify(args) })}`));
+  console.log(chalk9.dim(`  \u23F5 ${summarizeToolCall({ ...call, arguments: JSON.stringify(args) })}`));
   switch (call.name) {
     case "read_file":
-      return readFile(args);
+      return readFile(args, perms);
     case "glob":
-      return glob(args);
+      return glob(args, perms);
     case "grep":
-      return grep(args);
+      return grep(args, perms);
     case "ls":
-      return ls(args);
+      return ls(args, perms);
     case "bash":
       return bash(args, perms);
     case "write_file":
@@ -1443,6 +1674,7 @@ args: ${call.arguments}` };
 }
 
 // src/agent.ts
+var MAX_TOOL_ARGS_BYTES = 256e3;
 function formatMetaLine(final) {
   const meta = final.meta ?? {};
   const model = typeof final.model === "string" && final.model || meta.model;
@@ -1485,7 +1717,13 @@ async function consumeStream(messages, opts) {
       const cur = toolBuffers.get(idx) ?? { args: "" };
       if (ev.delta.id) cur.id = ev.delta.id;
       if (ev.delta.name) cur.name = ev.delta.name;
-      if (ev.delta.argumentsDelta) cur.args = (cur.args ?? "") + ev.delta.argumentsDelta;
+      if (ev.delta.argumentsDelta && !cur.overflow) {
+        if (cur.args.length + ev.delta.argumentsDelta.length > MAX_TOOL_ARGS_BYTES) {
+          cur.overflow = true;
+        } else {
+          cur.args += ev.delta.argumentsDelta;
+        }
+      }
       toolBuffers.set(idx, cur);
     } else if (ev.type === "done") {
       final = ev.final;
@@ -1497,7 +1735,7 @@ async function consumeStream(messages, opts) {
     return {
       id: buf.id ?? `call_${i}`,
       name: buf.name ?? "",
-      arguments: buf.args ?? ""
+      arguments: buf.overflow ? "[oversized: tool arguments exceeded the 256 KB limit]" : buf.args ?? ""
     };
   }).filter((c) => c.name);
   const assistant = {
@@ -1525,12 +1763,12 @@ async function runAgentTurn(messages, perms, opts) {
     } catch (err) {
       if (err instanceof AxonBackendError) {
         if (err.status === 401) {
-          console.error("\n" + chalk8.red("\u2717 Invalid or revoked key.") + " Run " + chalk8.bold("axon login") + " to refresh.");
+          console.error("\n" + chalk10.red("\u2717 Invalid or revoked key.") + " Run " + chalk10.bold("axon login") + " to refresh.");
         } else {
-          console.error("\n" + chalk8.red(`\u2717 ${err.message}`) + chalk8.dim(`  (${err.code})`));
+          console.error("\n" + chalk10.red(`\u2717 ${err.message}`) + chalk10.dim(`  (${err.code})`));
         }
       } else {
-        console.error("\n" + chalk8.red(`\u2717 ${err.message ?? err}`));
+        console.error("\n" + chalk10.red(`\u2717 ${err.message ?? err}`));
       }
       return;
     }
@@ -1540,7 +1778,7 @@ async function runAgentTurn(messages, perms, opts) {
       process.stdout.write("\n");
       if (opts.showMeta !== false && lastFinal) {
         const line = formatMetaLine(lastFinal);
-        if (line) console.log(chalk8.dim(`> ${line}`));
+        if (line) console.log(chalk10.dim(`> ${line}`));
       }
       return;
     }
@@ -1552,7 +1790,7 @@ async function runAgentTurn(messages, perms, opts) {
       } catch (err) {
         result = { ok: false, error: `tool dispatch threw: ${err.message}` };
       }
-      const preview = (result.ok ? chalk8.green("    ok") : chalk8.red(`    \u2717 ${result.error}`)) + (result.truncated ? chalk8.dim("  (truncated)") : "");
+      const preview = (result.ok ? chalk10.green("    ok") : chalk10.red(`    \u2717 ${result.error}`)) + (result.truncated ? chalk10.dim("  (truncated)") : "");
       console.log(preview);
       messages.push({
         role: "tool",
@@ -1567,11 +1805,11 @@ async function runAgentTurn(messages, perms, opts) {
     }
   }
   console.log("");
-  console.log(chalk8.yellow(`(hit max-turns ${maxTurns} \u2014 stopping)`));
+  console.log(chalk10.yellow(`(hit max-turns ${maxTurns} \u2014 stopping)`));
 }
 
 // src/permissions.ts
-import chalk9 from "chalk";
+import chalk11 from "chalk";
 import prompts from "prompts";
 var PermissionStore = class {
   always = /* @__PURE__ */ new Map();
@@ -1592,14 +1830,14 @@ var PermissionStore = class {
   async request(req) {
     if (this.hasPermission(req.tool, req.key)) return "allow";
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
-      console.log(chalk9.yellow(`
+      console.log(chalk11.yellow(`
   (denied \u2014 interactive permission needed for ${req.tool} "${req.key}")`));
       return "deny";
     }
     console.log("");
-    console.log(chalk9.bold.yellow(`  The model wants to use ${req.tool}:`));
+    console.log(chalk11.bold.yellow(`  The model wants to use ${req.tool}:`));
     console.log("");
-    console.log(`  ${chalk9.cyan(req.summary)}`);
+    console.log(`  ${chalk11.cyan(req.summary)}`);
     if (req.detail) {
       console.log("");
       console.log(req.detail);
@@ -1626,15 +1864,15 @@ var PermissionStore = class {
 };
 
 // src/axonmd.ts
-import { existsSync as existsSync3, readFileSync as readFileSync2, lstatSync } from "fs";
-import { dirname as dirname3, join as join2, relative as relative4 } from "path";
+import { existsSync as existsSync4, readFileSync as readFileSync2, lstatSync } from "fs";
+import { dirname as dirname4, join as join3, relative as relative5 } from "path";
 var MAX_MEMORY_CHARS = 16e3;
-var MAX_WALK_DEPTH = 25;
+var MAX_WALK_DEPTH2 = 25;
 var PROJECT_FILENAMES = ["AXON.md", "CLAUDE.md"];
 var MAX_FILE_BYTES2 = 256 * 1024;
 function tryReadFile(path) {
   try {
-    if (!existsSync3(path)) return null;
+    if (!existsSync4(path)) return null;
     const st = lstatSync(path);
     if (st.isSymbolicLink()) return null;
     if (!st.isFile()) return null;
@@ -1644,11 +1882,11 @@ function tryReadFile(path) {
     return null;
   }
 }
-function findGitRoot(start) {
+function findGitRoot2(start) {
   let dir = start;
-  for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
-    if (existsSync3(join2(dir, ".git"))) return dir;
-    const parent = dirname3(dir);
+  for (let depth = 0; depth < MAX_WALK_DEPTH2; depth++) {
+    if (existsSync4(join3(dir, ".git"))) return dir;
+    const parent = dirname4(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -1656,7 +1894,7 @@ function findGitRoot(start) {
 }
 function resolveMemory(cwd = process.cwd()) {
   const sources = [];
-  const globalPath = join2(configDir(), "AXON.md");
+  const globalPath = join3(configDir(), "AXON.md");
   const globalContent = tryReadFile(globalPath);
   if (globalContent && globalContent.trim().length > 0) {
     sources.push({
@@ -1667,18 +1905,18 @@ function resolveMemory(cwd = process.cwd()) {
       bytes: Buffer.byteLength(globalContent, "utf-8")
     });
   }
-  const gitRoot = findGitRoot(cwd);
+  const gitRoot = findGitRoot2(cwd);
   const chain = [];
   let dir = cwd;
-  for (let depth = 0; depth < MAX_WALK_DEPTH; depth++) {
+  for (let depth = 0; depth < MAX_WALK_DEPTH2; depth++) {
     for (const name of PROJECT_FILENAMES) {
-      const p = join2(dir, name);
+      const p = join3(dir, name);
       const content = tryReadFile(p);
       if (content && content.trim().length > 0) {
         chain.push({
           path: p,
           scope: "project",
-          relLabel: relative4(cwd, p) || name,
+          relLabel: relative5(cwd, p) || name,
           content,
           bytes: Buffer.byteLength(content, "utf-8")
         });
@@ -1687,7 +1925,7 @@ function resolveMemory(cwd = process.cwd()) {
     }
     if (gitRoot === null) break;
     if (dir === gitRoot) break;
-    const parent = dirname3(dir);
+    const parent = dirname4(dir);
     if (parent === dir) break;
     dir = parent;
   }
@@ -1735,6 +1973,9 @@ function memoryBannerLine(mem) {
   const n = mem.sources.length;
   return `${n} file${n === 1 ? "" : "s"} \u2014 ${labels}${suffix}`;
 }
+function claudeMdSources(mem) {
+  return mem.sources.filter((s) => s.relLabel.toLowerCase().endsWith("claude.md")).map((s) => s.relLabel);
+}
 
 // src/commands/chat.ts
 var AGENT_SYSTEM_PROMPT = [
@@ -1748,7 +1989,7 @@ var STDIN_INITIAL_QUIET_MS = 150;
 var STDIN_POST_DATA_QUIET_MS = 1e3;
 async function readStdin() {
   if (process.stdin.isTTY === true) return "";
-  return new Promise((resolve10, reject) => {
+  return new Promise((resolve8, reject) => {
     let data = "";
     let timer = null;
     let sawData = false;
@@ -1765,7 +2006,7 @@ async function readStdin() {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         cleanup();
-        resolve10(data);
+        resolve8(data);
       }, ms);
     };
     armQuiet(STDIN_INITIAL_QUIET_MS);
@@ -1777,11 +2018,11 @@ async function readStdin() {
     });
     process.stdin.on("end", () => {
       cleanup();
-      resolve10(data);
+      resolve8(data);
     });
     process.stdin.on("error", (err) => {
       cleanup();
-      if (sawData) resolve10(data);
+      if (sawData) resolve8(data);
       else reject(err);
     });
   });
@@ -1820,14 +2061,14 @@ function formatMetaLine2(final) {
 async function runChat(promptArg, opts) {
   const cfg = readConfig();
   if (!cfg.apiKey) {
-    console.error(chalk10.yellow("Not logged in.") + " Run " + chalk10.bold("axon login") + " first.");
+    console.error(chalk12.yellow("Not logged in.") + " Run " + chalk12.bold("axon login") + " first.");
     process.exitCode = 1;
     return;
   }
   const stdin = await readStdin();
   const prompt2 = buildPrompt(promptArg, stdin);
   if (!prompt2) {
-    console.error(chalk10.red("\u2717 No prompt. Pass one as an argument or pipe via stdin."));
+    console.error(chalk12.red("\u2717 No prompt. Pass one as an argument or pipe via stdin."));
     process.exitCode = 1;
     return;
   }
@@ -1899,12 +2140,12 @@ async function runChat(promptArg, opts) {
     process.off("SIGINT", onSignal);
     if (err instanceof AxonBackendError) {
       if (err.status === 401) {
-        console.error("\n" + chalk10.red("\u2717 Invalid or revoked key.") + " Run " + chalk10.bold("axon login") + " to refresh.");
+        console.error("\n" + chalk12.red("\u2717 Invalid or revoked key.") + " Run " + chalk12.bold("axon login") + " to refresh.");
       } else {
-        console.error("\n" + chalk10.red(`\u2717 ${err.message}`) + chalk10.dim(`  (${err.code})`));
+        console.error("\n" + chalk12.red(`\u2717 ${err.message}`) + chalk12.dim(`  (${err.code})`));
       }
     } else {
-      console.error("\n" + chalk10.red(`\u2717 ${err.message ?? err}`));
+      console.error("\n" + chalk12.red(`\u2717 ${err.message ?? err}`));
     }
     process.exitCode = 1;
     return;
@@ -1926,7 +2167,7 @@ async function runChat(promptArg, opts) {
   process.stdout.write("\n");
   if (opts.meta !== false && final) {
     const line = formatMetaLine2(final);
-    if (line) console.log(chalk10.dim(`> ${line}`));
+    if (line) console.log(chalk12.dim(`> ${line}`));
   }
 }
 function registerChat(program2) {
@@ -1939,15 +2180,15 @@ async function runChatDirect(promptArg, opts) {
 }
 
 // src/commands/repl.ts
-import chalk12 from "chalk";
+import chalk14 from "chalk";
 
 // src/repl.ts
 import { createInterface } from "readline";
-import chalk11 from "chalk";
+import chalk13 from "chalk";
 
 // src/context.ts
 import { promises as fs6 } from "fs";
-import { basename, isAbsolute as isAbsolute9, relative as relative5, resolve as resolve9 } from "path";
+import { basename, isAbsolute as isAbsolute6, relative as relative6, resolve as resolve7 } from "path";
 var MAX_CONTEXT_CHARS = 32e3;
 function totalChars(files) {
   let n = 0;
@@ -1955,8 +2196,8 @@ function totalChars(files) {
   return n;
 }
 var AttachedFiles = class {
-  constructor(workspaceRoot = process.cwd()) {
-    this.workspaceRoot = workspaceRoot;
+  constructor(workspaceRoot2 = process.cwd()) {
+    this.workspaceRoot = workspaceRoot2;
   }
   workspaceRoot;
   files = /* @__PURE__ */ new Map();
@@ -1977,7 +2218,7 @@ var AttachedFiles = class {
    * Throws on FS error or when adding the file would exceed MAX_CONTEXT_CHARS.
    */
   async add(rawPath) {
-    const abs = isAbsolute9(rawPath) ? rawPath : resolve9(this.workspaceRoot, rawPath);
+    const abs = isAbsolute6(rawPath) ? rawPath : resolve7(this.workspaceRoot, rawPath);
     if (this.files.has(abs)) return this.files.get(abs);
     const stat = await fs6.stat(abs);
     if (!stat.isFile()) {
@@ -1992,7 +2233,7 @@ var AttachedFiles = class {
     }
     const file = {
       path: abs,
-      relPath: relative5(this.workspaceRoot, abs) || basename(abs),
+      relPath: relative6(this.workspaceRoot, abs) || basename(abs),
       content,
       bytes: Buffer.byteLength(content, "utf-8"),
       language: detectLanguage(abs)
@@ -2119,12 +2360,17 @@ var PendingEditState = class {
 };
 
 // src/telemetry.ts
+import { basename as basename2 } from "path";
 async function postEditorEvent(input) {
   const cfg = readConfig();
   if (cfg.telemetry === false) return false;
   if (!cfg.apiKey) return false;
   const wire = {
     ...input,
+    // Send only the filename — never the full path. The backend keys routing
+    // memory on the prompt/edit, not the location, so the parent path would only
+    // leak the user's project structure.
+    filePath: input.filePath ? basename2(input.filePath) : void 0,
     // Backend overwrites tenantId from the bearer-auth context, but the
     // validation gate insists on a string field — send the configured one.
     tenantId: cfg.tenantId ?? "cli",
@@ -2154,39 +2400,41 @@ var SYSTEM_PROMPT = [
 ].join(" ");
 function banner(state) {
   console.log("");
-  console.log("  " + chalk11.bold("AXON") + chalk11.dim("  \xB7  /help for commands, /exit to leave"));
-  console.log("  " + chalk11.dim(`mode: ${state.mode}  \xB7  cwd: ${state.attached.workspaceRoot}`));
+  console.log("  " + chalk13.bold("AXON") + chalk13.dim("  \xB7  /help for commands, /exit to leave"));
+  console.log("  " + chalk13.dim(`mode: ${state.mode}  \xB7  cwd: ${state.attached.workspaceRoot}`));
   const mem = memoryBannerLine(state.memory);
-  if (mem) console.log("  " + chalk11.dim(`memory: ${mem}`));
+  if (mem) console.log("  " + chalk13.dim(`memory: ${mem}`));
+  const claude = claudeMdSources(state.memory);
+  if (claude.length) console.log("  " + chalk13.dim(`note: trusting ${claude.join(", ")} for Claude-Code compatibility`));
   console.log("");
 }
 function helpText() {
   return [
     "",
-    chalk11.bold("how to use"),
+    chalk13.bold("how to use"),
     `  Just type. The model has tools to read files, glob, grep, ls, run`,
     `  shell commands, write/edit files, and fetch URLs. Mutating tools`,
     `  (bash / write / edit / web_fetch) ask for permission per call.`,
     "",
-    chalk11.bold("slash commands"),
-    `  ${chalk11.cyan("/file <path>")}        attach a file (counts toward 32k context cap)`,
-    `  ${chalk11.cyan("/files <p1> <p2>")}    attach multiple files`,
-    `  ${chalk11.cyan("/clear")}              detach files + reset conversation + drop pending edit`,
-    `  ${chalk11.cyan("/status")}             attached files, mode, pending edit, turn count`,
-    `  ${chalk11.cyan("/memory")}             list resolved AXON.md memory (re-reads from disk)`,
-    `  ${chalk11.cyan("/mode <auto|coding|chat>")}  toggle session mode`,
-    `  ${chalk11.cyan("/apply")} or ${chalk11.cyan("a")}        apply a legacy pending edit (M2 code_edit path)`,
-    `  ${chalk11.cyan("/reject")} or ${chalk11.cyan("r")}       reject the pending edit`,
-    `  ${chalk11.cyan("/undo")}               revert the last applied edit`,
-    `  ${chalk11.cyan("/help")}               this list`,
-    `  ${chalk11.cyan("/exit")} or ${chalk11.cyan("Ctrl-D")}   leave the REPL`,
+    chalk13.bold("slash commands"),
+    `  ${chalk13.cyan("/file <path>")}        attach a file (counts toward 32k context cap)`,
+    `  ${chalk13.cyan("/files <p1> <p2>")}    attach multiple files`,
+    `  ${chalk13.cyan("/clear")}              detach files + reset conversation + drop pending edit`,
+    `  ${chalk13.cyan("/status")}             attached files, mode, pending edit, turn count`,
+    `  ${chalk13.cyan("/memory")}             list resolved AXON.md memory (re-reads from disk)`,
+    `  ${chalk13.cyan("/mode <auto|coding|chat>")}  toggle session mode`,
+    `  ${chalk13.cyan("/apply")} or ${chalk13.cyan("a")}        apply a legacy pending edit (M2 code_edit path)`,
+    `  ${chalk13.cyan("/reject")} or ${chalk13.cyan("r")}       reject the pending edit`,
+    `  ${chalk13.cyan("/undo")}               revert the last applied edit`,
+    `  ${chalk13.cyan("/help")}               this list`,
+    `  ${chalk13.cyan("/exit")} or ${chalk13.cyan("Ctrl-D")}   leave the REPL`,
     ""
   ].join("\n");
 }
 async function runTurn(state, userPrompt) {
   const cfg = readConfig();
   if (!cfg.apiKey) {
-    console.log(chalk11.yellow("(not logged in \u2014 run `axon login`)"));
+    console.log(chalk13.yellow("(not logged in \u2014 run `axon login`)"));
     return;
   }
   if (state.messages.length === 0) {
@@ -2216,7 +2464,7 @@ async function runTurn(state, userPrompt) {
 async function cmdApply(state) {
   const p = state.pending.getPending();
   if (!p) {
-    console.log(chalk11.dim("(nothing pending)"));
+    console.log(chalk13.dim("(nothing pending)"));
     return;
   }
   try {
@@ -2228,72 +2476,74 @@ async function cmdApply(state) {
     state.pending.clearPending();
     await postEditorEvent({ event: "edit_applied", requestId: p.requestId, filePath: applied.filePath });
     await postEditorEvent({ event: "edit_accepted", requestId: p.requestId, filePath: applied.filePath });
-    console.log(chalk11.green(`\u2713 applied ${applied.filePath}`) + chalk11.dim(applied.wasNewFile ? "  (new file)" : ""));
+    console.log(chalk13.green(`\u2713 applied ${applied.filePath}`) + chalk13.dim(applied.wasNewFile ? "  (new file)" : ""));
   } catch (err) {
-    console.error(chalk11.red(`\u2717 ${err.message}`));
+    console.error(chalk13.red(`\u2717 ${err.message}`));
   }
 }
 async function cmdReject(state) {
   const p = state.pending.getPending();
   if (!p) {
-    console.log(chalk11.dim("(nothing pending)"));
+    console.log(chalk13.dim("(nothing pending)"));
     return;
   }
   state.pending.clearPending();
   await postEditorEvent({ event: "edit_rejected", requestId: p.requestId, filePath: p.payload.filePath, method: "command" });
-  console.log(chalk11.yellow("\u2717 rejected") + chalk11.dim(" \u2014 fed back to routing memory"));
+  console.log(chalk13.yellow("\u2717 rejected") + chalk13.dim(" \u2014 fed back to routing memory"));
 }
 async function cmdUndo(state) {
   const la = state.pending.getLastApplied();
   if (!la) {
-    console.log(chalk11.dim("(nothing to undo)"));
+    console.log(chalk13.dim("(nothing to undo)"));
     return;
   }
   try {
     await revertAppliedEdit(la.applied);
     state.pending.clearLastApplied();
     await postEditorEvent({ event: "edit_rejected", requestId: la.requestId, filePath: la.applied.filePath, method: "undo" });
-    console.log(chalk11.yellow(`\u21B6 reverted ${la.applied.filePath}`));
+    console.log(chalk13.yellow(`\u21B6 reverted ${la.applied.filePath}`));
   } catch (err) {
-    console.error(chalk11.red(`\u2717 ${err.message}`));
+    console.error(chalk13.red(`\u2717 ${err.message}`));
   }
 }
 function cmdStatus(state) {
   const turnCount = Math.max(0, state.messages.filter((m) => m.role !== "system").length);
   console.log("");
-  console.log(`  ${chalk11.dim("mode:")}      ${state.mode}`);
-  console.log(`  ${chalk11.dim("cwd:")}       ${state.attached.workspaceRoot}`);
-  console.log(`  ${chalk11.dim("turns:")}     ${turnCount} message${turnCount === 1 ? "" : "s"} in history`);
-  console.log(`  ${chalk11.dim("attached:")}  ${state.attached.size()} file${state.attached.size() === 1 ? "" : "s"}`);
+  console.log(`  ${chalk13.dim("mode:")}      ${state.mode}`);
+  console.log(`  ${chalk13.dim("cwd:")}       ${state.attached.workspaceRoot}`);
+  console.log(`  ${chalk13.dim("turns:")}     ${turnCount} message${turnCount === 1 ? "" : "s"} in history`);
+  console.log(`  ${chalk13.dim("attached:")}  ${state.attached.size()} file${state.attached.size() === 1 ? "" : "s"}`);
   for (const f of state.attached.list()) {
-    console.log(`    \xB7 ${f.relPath} ${chalk11.dim(`(${f.bytes}B)`)}`);
+    console.log(`    \xB7 ${f.relPath} ${chalk13.dim(`(${f.bytes}B)`)}`);
   }
   const p = state.pending.getPending();
   if (p) {
     const kind = "newContent" in p.payload ? "full-file" : "search/replace";
-    console.log(`  ${chalk11.dim("pending:")}   ${p.payload.filePath} ${chalk11.dim(`(${kind})`)}`);
+    console.log(`  ${chalk13.dim("pending:")}   ${p.payload.filePath} ${chalk13.dim(`(${kind})`)}`);
   } else {
-    console.log(`  ${chalk11.dim("pending:")}   ${chalk11.dim("(none)")}`);
+    console.log(`  ${chalk13.dim("pending:")}   ${chalk13.dim("(none)")}`);
   }
   const la = state.pending.getLastApplied();
-  if (la) console.log(`  ${chalk11.dim("undoable:")}  ${la.applied.filePath}`);
+  if (la) console.log(`  ${chalk13.dim("undoable:")}  ${la.applied.filePath}`);
   const mem = memoryBannerLine(state.memory);
-  console.log(`  ${chalk11.dim("memory:")}    ${mem ?? chalk11.dim("(none)")}`);
+  console.log(`  ${chalk13.dim("memory:")}    ${mem ?? chalk13.dim("(none)")}`);
+  const claude = claudeMdSources(state.memory);
+  if (claude.length) console.log(`  ${chalk13.dim("compat:")}    ${chalk13.dim(`trusting ${claude.join(", ")} (Claude-Code)`)}`);
   console.log("");
 }
 function cmdMemory(state) {
   state.memory = resolveMemory(state.attached.workspaceRoot);
   console.log("");
   if (state.memory.sources.length === 0) {
-    console.log(chalk11.dim("  no AXON.md / CLAUDE.md found in ~/.axon or the cwd hierarchy"));
+    console.log(chalk13.dim("  no AXON.md / CLAUDE.md found in ~/.axon or the cwd hierarchy"));
   } else {
-    console.log(`  ${chalk11.dim("AXON.md memory (root-most first; later files win):")}`);
+    console.log(`  ${chalk13.dim("AXON.md memory (root-most first; later files win):")}`);
     for (const s of state.memory.sources) {
-      console.log(`    \xB7 ${s.relLabel} ${chalk11.dim(`(${s.bytes}B, ${s.scope})`)}`);
+      console.log(`    \xB7 ${s.relLabel} ${chalk13.dim(`(${s.bytes}B, ${s.scope})`)}`);
     }
-    if (state.memory.truncated) console.log(chalk11.yellow("  (truncated to fit the context budget)"));
+    if (state.memory.truncated) console.log(chalk13.yellow("  (truncated to fit the context budget)"));
   }
-  console.log(chalk11.dim("  re-applied to the next conversation (run /clear to reseed now)"));
+  console.log(chalk13.dim("  re-applied to the next conversation (run /clear to reseed now)"));
   console.log("");
 }
 async function dispatch(state, line) {
@@ -2309,7 +2559,7 @@ async function dispatch(state, line) {
     return { exit: false };
   }
   if (pendingExists && (trimmed === "e" || trimmed === "E")) {
-    console.log(chalk11.dim("(pending kept \u2014 send a refining prompt to update it)"));
+    console.log(chalk13.dim("(pending kept \u2014 send a refining prompt to update it)"));
     return { exit: false };
   }
   if (!trimmed.startsWith("/")) {
@@ -2338,7 +2588,7 @@ async function dispatch(state, line) {
       state.attached.clear();
       state.pending.clearPending();
       state.messages.length = 0;
-      console.log(chalk11.dim("(cleared attachments + conversation + pending)"));
+      console.log(chalk13.dim("(cleared attachments + conversation + pending)"));
       return { exit: false };
     case "mode": {
       const m = args.trim();
@@ -2347,38 +2597,38 @@ async function dispatch(state, line) {
         return { exit: false };
       }
       if (!isSessionMode(m)) {
-        console.log(chalk11.red(`\u2717 unknown mode "${m}" \u2014 expected auto | coding | chat`));
+        console.log(chalk13.red(`\u2717 unknown mode "${m}" \u2014 expected auto | coding | chat`));
         return { exit: false };
       }
       state.mode = m;
-      console.log(chalk11.dim(`(mode \u2192 ${m})`));
+      console.log(chalk13.dim(`(mode \u2192 ${m})`));
       return { exit: false };
     }
     case "file": {
       if (!args) {
-        console.log(chalk11.red("\u2717 /file <path>"));
+        console.log(chalk13.red("\u2717 /file <path>"));
         return { exit: false };
       }
       try {
         const f = await state.attached.add(args);
-        console.log(chalk11.dim(`\u2713 attached ${f.relPath} (${f.bytes}B)`));
+        console.log(chalk13.dim(`\u2713 attached ${f.relPath} (${f.bytes}B)`));
       } catch (err) {
-        console.log(chalk11.red(`\u2717 ${err.message}`));
+        console.log(chalk13.red(`\u2717 ${err.message}`));
       }
       return { exit: false };
     }
     case "files": {
       const paths = rest.filter(Boolean);
       if (paths.length === 0) {
-        console.log(chalk11.red("\u2717 /files <path1> <path2> \u2026"));
+        console.log(chalk13.red("\u2717 /files <path1> <path2> \u2026"));
         return { exit: false };
       }
       for (const p of paths) {
         try {
           const f = await state.attached.add(p);
-          console.log(chalk11.dim(`\u2713 ${f.relPath} (${f.bytes}B)`));
+          console.log(chalk13.dim(`\u2713 ${f.relPath} (${f.bytes}B)`));
         } catch (err) {
-          console.log(chalk11.red(`\u2717 ${p}: ${err.message}`));
+          console.log(chalk13.red(`\u2717 ${p}: ${err.message}`));
         }
       }
       return { exit: false };
@@ -2393,12 +2643,12 @@ async function dispatch(state, line) {
       await cmdUndo(state);
       return { exit: false };
     default:
-      console.log(chalk11.red(`\u2717 unknown command "/${cmd}" \u2014 try /help`));
+      console.log(chalk13.red(`\u2717 unknown command "/${cmd}" \u2014 try /help`));
       return { exit: false };
   }
 }
 function prompt(rl) {
-  rl.setPrompt(chalk11.bold.green("\u203A "));
+  rl.setPrompt(chalk13.bold.green("\u203A "));
   rl.prompt();
 }
 async function runRepl() {
@@ -2424,7 +2674,7 @@ async function runRepl() {
       const { exit } = await dispatch(state, rawLine);
       if (exit) break;
     } catch (err) {
-      console.error(chalk11.red(`\u2717 ${err.message ?? err}`));
+      console.error(chalk13.red(`\u2717 ${err.message ?? err}`));
     }
     prompt(rl);
   }
@@ -2437,7 +2687,7 @@ function registerRepl(program2) {
   program2.command("repl").description("Start the interactive REPL (also the bare `axon` action when logged in).").action(async () => {
     const cfg = readConfig();
     if (!cfg.apiKey) {
-      console.error(chalk12.yellow("Not logged in.") + " Run " + chalk12.bold("axon login") + " first.");
+      console.error(chalk14.yellow("Not logged in.") + " Run " + chalk14.bold("axon login") + " first.");
       process.exitCode = 1;
       return;
     }
@@ -2446,12 +2696,12 @@ function registerRepl(program2) {
 }
 
 // src/onboarding.ts
-import chalk13 from "chalk";
+import chalk15 from "chalk";
 import prompts2 from "prompts";
 function banner2() {
   console.log("");
-  console.log("  " + chalk13.bold("AXON") + chalk13.dim("  \xB7  the operating layer for AI agents"));
-  console.log("  " + chalk13.dim("run \xB7 route \xB7 remember \xB7 spend"));
+  console.log("  " + chalk15.bold("AXON") + chalk15.dim("  \xB7  the operating layer for AI agents"));
+  console.log("  " + chalk15.dim("run \xB7 route \xB7 remember \xB7 spend"));
   console.log("");
 }
 function isInteractive() {
@@ -2465,8 +2715,8 @@ function shouldRunFirstRun() {
 }
 async function runFirstRun() {
   banner2();
-  console.log("  " + chalk13.dim("Looks like this is your first AXON session."));
-  console.log("  " + chalk13.dim("Let's get you authenticated \u2014 pick one:"));
+  console.log("  " + chalk15.dim("Looks like this is your first AXON session."));
+  console.log("  " + chalk15.dim("Let's get you authenticated \u2014 pick one:"));
   console.log("");
   const response = await prompts2({
     type: "select",
@@ -2508,7 +2758,7 @@ async function runFirstRun() {
         validate: (v) => v.trim().startsWith("axon_") ? true : "Must start with axon_"
       });
       if (!keyResp.key) {
-        console.log(chalk13.dim("  (cancelled)"));
+        console.log(chalk15.dim("  (cancelled)"));
         return;
       }
       console.log("");
@@ -2519,20 +2769,20 @@ async function runFirstRun() {
       const url = "https://axon.nexalyte.tech";
       const opened = openBrowser(url);
       console.log("");
-      console.log("  " + chalk13.cyan(url) + (opened ? chalk13.dim("  (opened for you)") : ""));
-      console.log("  " + chalk13.dim("Claim a seat. Once approved you'll receive an AXON API key \u2014 paste it via `axon login --key`."));
+      console.log("  " + chalk15.cyan(url) + (opened ? chalk15.dim("  (opened for you)") : ""));
+      console.log("  " + chalk15.dim("Claim a seat. Once approved you'll receive an AXON API key \u2014 paste it via `axon login --key`."));
       return;
     }
     default:
-      console.log(chalk13.dim("  (no changes)"));
+      console.log(chalk15.dim("  (no changes)"));
       return;
   }
 }
 
 // src/index.ts
-var VERSION = "0.0.10";
+var VERSION = "0.0.11";
 var program = new Command();
-program.name("axon").description("AXON \u2014 the terminal client for routing + execution-memory.").version(VERSION, "-v, --version", "Show CLI version.").showHelpAfterError(chalk14.dim("(run `axon --help` for command list)"));
+program.name("axon").description("AXON \u2014 the terminal client for routing + execution-memory.").version(VERSION, "-v, --version", "Show CLI version.").showHelpAfterError(chalk16.dim("(run `axon --help` for command list)"));
 registerLogin(program);
 registerWhoami(program);
 registerLogout(program);
@@ -2574,7 +2824,7 @@ main().then(
   // For a one-shot CLI we want to terminate as soon as the command returns.
   () => process.exit(process.exitCode ?? 0),
   (err) => {
-    console.error(chalk14.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
+    console.error(chalk16.red(`\u2717 ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
 );

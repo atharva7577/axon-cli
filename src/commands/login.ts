@@ -15,7 +15,7 @@
 import chalk from "chalk";
 import ora from "ora";
 import { Command } from "commander";
-import { getJson, postJson, AxonBackendError } from "../http.js";
+import { getJson, postJson, AxonBackendError, assertSecureBase } from "../http.js";
 import { patchConfig, readConfig } from "../config.js";
 import { openBrowser } from "../browser.js";
 
@@ -159,8 +159,16 @@ export async function runHeadlessKeyFlow(apiBase: string, apiKey: string): Promi
     return;
   }
   spinner.succeed("Verified.");
+  const previous = readConfig();
   patchConfig({ apiBase, apiKey });
   console.log(chalk.green(`  ✓ Logged in. Key ${maskKey(apiKey)} saved to ${chalk.dim("~/.axon/config.json")}.`));
+
+  // Surface the telemetry notice here too — the headless path skips the wizard,
+  // so otherwise the user would never be told telemetry is on by default.
+  if (previous.telemetry !== false) {
+    console.log("");
+    console.log(chalk.dim(TELEMETRY_NOTICE));
+  }
 }
 
 export function registerLogin(program: Command): void {
@@ -174,6 +182,7 @@ export function registerLogin(program: Command): void {
       const cfg     = readConfig();
       const apiBase = (opts.base?.trim() || cfg.apiBase);
       try {
+        assertSecureBase(apiBase); // fail fast before sending the key anywhere
         if (opts.key && opts.key.trim()) {
           await runHeadlessKeyFlow(apiBase, opts.key.trim());
         } else {

@@ -25,7 +25,7 @@ import {
 import { postEditorEvent } from "./telemetry.js";
 import { PermissionStore } from "./permissions.js";
 import { runAgentTurn, type ChatMessage } from "./agent.js";
-import { resolveMemory, withMemory, memoryBannerLine, type ResolvedMemory } from "./axonmd.js";
+import { resolveMemory, withMemory, memoryBannerLine, claudeMdSources, type ResolvedMemory } from "./axonmd.js";
 
 const SYSTEM_PROMPT = [
   "You are AXON, a terminal-native coding assistant running on the user's machine.",
@@ -52,6 +52,8 @@ function banner(state: ReplState): void {
   console.log("  " + chalk.dim(`mode: ${state.mode}  ·  cwd: ${state.attached.workspaceRoot}`));
   const mem = memoryBannerLine(state.memory);
   if (mem) console.log("  " + chalk.dim(`memory: ${mem}`));
+  const claude = claudeMdSources(state.memory);
+  if (claude.length) console.log("  " + chalk.dim(`note: trusting ${claude.join(", ")} for Claude-Code compatibility`));
   console.log("");
 }
 
@@ -179,6 +181,8 @@ function cmdStatus(state: ReplState): void {
   if (la) console.log(`  ${chalk.dim("undoable:")}  ${la.applied.filePath}`);
   const mem = memoryBannerLine(state.memory);
   console.log(`  ${chalk.dim("memory:")}    ${mem ?? chalk.dim("(none)")}`);
+  const claude = claudeMdSources(state.memory);
+  if (claude.length) console.log(`  ${chalk.dim("compat:")}    ${chalk.dim(`trusting ${claude.join(", ")} (Claude-Code)`)}`);
   console.log("");
 }
 
