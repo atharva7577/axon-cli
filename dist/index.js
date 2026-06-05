@@ -925,9 +925,41 @@ async function readFile(args, perms) {
 }
 
 // src/tools/glob.ts
-import { glob as fspGlob } from "fs/promises";
-import { promises as fsp } from "fs";
+import { promises as fsp2 } from "fs";
 import { isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
+
+// src/tools/walk.ts
+import { promises as fsp } from "fs";
+import { join as join3 } from "path";
+import { minimatch } from "minimatch";
+async function globFiles(pattern, opts) {
+  const { cwd, excludeDirs = [], max = 5e3 } = opts;
+  const exclude = new Set(excludeDirs);
+  const out = [];
+  async function walk(absDir, relDir) {
+    if (out.length >= max) return;
+    let entries;
+    try {
+      entries = await fsp.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      if (out.length >= max) return;
+      const relPath = relDir ? `${relDir}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) {
+        if (exclude.has(ent.name)) continue;
+        await walk(join3(absDir, ent.name), relPath);
+      } else if (ent.isFile()) {
+        if (minimatch(relPath, pattern, { dot: false })) out.push(relPath);
+      }
+    }
+  }
+  await walk(cwd, "");
+  return out;
+}
+
+// src/tools/glob.ts
 var MAX_RESULTS = 200;
 var DEFAULT_EXCLUDE = [
   "node_modules",
@@ -949,25 +981,24 @@ async function glob(args, perms) {
   try {
     let outsideDropped = 0;
     const matches = [];
-    const iter = fspGlob(args.pattern, {
+    const found = await globFiles(args.pattern, {
       cwd,
-      exclude: (p) => DEFAULT_EXCLUDE.some((d) => p.includes(`/${d}/`) || p.startsWith(`${d}/`) || p === d)
+      excludeDirs: DEFAULT_EXCLUDE,
+      max: MAX_RESULTS * 2
     });
-    for await (const m of iter) {
-      const rel = m;
+    for (const rel of found) {
       const abs = isAbsolute2(rel) ? rel : resolve2(cwd, rel);
       if (!isInsideRoot(abs, effectiveRoot)) {
         outsideDropped++;
         continue;
       }
       matches.push(rel);
-      if (matches.length >= MAX_RESULTS * 2) break;
     }
     const stamped = await Promise.all(
       matches.map(async (m) => {
         try {
           const abs = isAbsolute2(m) ? m : resolve2(cwd, m);
-          const s = await fsp.stat(abs);
+          const s = await fsp2.stat(abs);
           return { path: m, mtime: s.mtimeMs };
         } catch {
           return { path: m, mtime: 0 };
@@ -991,8 +1022,7 @@ ${out}${note}`,
 }
 
 // src/tools/grep.ts
-import { glob as fspGlob2 } from "fs/promises";
-import { promises as fsp2 } from "fs";
+import { promises as fsp3 } from "fs";
 import { isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
 var MAX_MATCHES = 100;
 var MAX_FILES = 50;
@@ -1022,12 +1052,8 @@ async function grep(args, _perms) {
   let scanned = 0;
   let truncated = false;
   try {
-    const iter = fspGlob2(pattern, {
-      cwd,
-      exclude: (p) => DEFAULT_EXCLUDE2.some((d) => p.includes(`/${d}/`) || p.startsWith(`${d}/`) || p === d)
-    });
-    for await (const relRaw of iter) {
-      const rel = relRaw;
+    const found = await globFiles(pattern, { cwd, excludeDirs: DEFAULT_EXCLUDE2 });
+    for (const rel of found) {
       if (scanned >= MAX_FILES) {
         truncated = true;
         break;
@@ -1039,10 +1065,10 @@ async function grep(args, _perms) {
       const abs = isAbsolute3(rel) ? rel : resolve3(cwd, rel);
       if (!isInsideRoot(canonicalize(abs))) continue;
       try {
-        const stat = await fsp2.stat(abs);
+        const stat = await fsp3.stat(abs);
         if (!stat.isFile()) continue;
         if (stat.size > MAX_FILE_BYTES) continue;
-        const content = await fsp2.readFile(abs, "utf-8");
+        const content = await fsp3.readFile(abs, "utf-8");
         scanned++;
         const lines = content.split("\n");
         for (let i = 0; i < lines.length; i++) {
@@ -1887,7 +1913,7 @@ var PermissionStore = class {
 
 // src/axonmd.ts
 import { existsSync as existsSync4, readFileSync as readFileSync2, lstatSync } from "fs";
-import { dirname as dirname4, join as join3, relative as relative5 } from "path";
+import { dirname as dirname4, join as join4, relative as relative5 } from "path";
 var MAX_MEMORY_CHARS = 16e3;
 var MAX_WALK_DEPTH2 = 25;
 var PROJECT_FILENAMES = ["AXON.md", "CLAUDE.md"];
@@ -1907,7 +1933,7 @@ function tryReadFile(path) {
 function findGitRoot2(start) {
   let dir = start;
   for (let depth = 0; depth < MAX_WALK_DEPTH2; depth++) {
-    if (existsSync4(join3(dir, ".git"))) return dir;
+    if (existsSync4(join4(dir, ".git"))) return dir;
     const parent = dirname4(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -1916,7 +1942,7 @@ function findGitRoot2(start) {
 }
 function resolveMemory(cwd = process.cwd()) {
   const sources = [];
-  const globalPath = join3(configDir(), "AXON.md");
+  const globalPath = join4(configDir(), "AXON.md");
   const globalContent = tryReadFile(globalPath);
   if (globalContent && globalContent.trim().length > 0) {
     sources.push({
@@ -1932,7 +1958,7 @@ function resolveMemory(cwd = process.cwd()) {
   let dir = cwd;
   for (let depth = 0; depth < MAX_WALK_DEPTH2; depth++) {
     for (const name of PROJECT_FILENAMES) {
-      const p = join3(dir, name);
+      const p = join4(dir, name);
       const content = tryReadFile(p);
       if (content && content.trim().length > 0) {
         chain.push({
@@ -2005,13 +2031,13 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 // src/mcp/registry.ts
 import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2, renameSync as renameSync2, chmodSync as chmodSync2 } from "fs";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 var NAME_RE = /^[A-Za-z0-9_-]+$/;
 function isValidServerName(name) {
   return NAME_RE.test(name);
 }
 function registryPath() {
-  return join4(configDir(), "mcp.json");
+  return join5(configDir(), "mcp.json");
 }
 function readMcpRegistry() {
   const path = registryPath();
@@ -2444,7 +2470,7 @@ import { dirname as dirname5 } from "path";
 
 // src/skills/discovery.ts
 import { existsSync as existsSync6, lstatSync as lstatSync2, readFileSync as readFileSync4, readdirSync } from "fs";
-import { join as join5 } from "path";
+import { join as join6 } from "path";
 var MAX_SKILL_BYTES = 256 * 1024;
 var NAME_RE2 = /^[A-Za-z0-9_-]+$/;
 function isValidSkillName(name) {
@@ -2488,9 +2514,9 @@ function safeRead(path) {
 }
 function skillDirs(cwd) {
   return [
-    { dir: join5(configDir(), "skills"), scope: "global", label: "~/.axon/skills" },
-    { dir: join5(cwd, ".claude", "skills"), scope: "project", label: ".claude/skills" },
-    { dir: join5(cwd, ".axon", "skills"), scope: "project", label: ".axon/skills" }
+    { dir: join6(configDir(), "skills"), scope: "global", label: "~/.axon/skills" },
+    { dir: join6(cwd, ".claude", "skills"), scope: "project", label: ".claude/skills" },
+    { dir: join6(cwd, ".axon", "skills"), scope: "project", label: ".axon/skills" }
   ];
 }
 function readSkillDir(d) {
@@ -2507,9 +2533,9 @@ function readSkillDir(d) {
     let file = null;
     if (e.isFile() && /\.md$/i.test(e.name) && e.name.toLowerCase() !== "skill.md") {
       name = e.name.replace(/\.md$/i, "");
-      file = join5(d.dir, e.name);
+      file = join6(d.dir, e.name);
     } else if (e.isDirectory()) {
-      const candidate = join5(d.dir, e.name, "SKILL.md");
+      const candidate = join6(d.dir, e.name, "SKILL.md");
       if (existsSync6(candidate)) {
         name = e.name;
         file = candidate;
@@ -2542,7 +2568,7 @@ function findSkill(name, cwd = process.cwd()) {
   return discoverSkills(cwd).find((s) => s.name === name) ?? null;
 }
 function newSkillPath(name) {
-  return join5(configDir(), "skills", name, "SKILL.md");
+  return join6(configDir(), "skills", name, "SKILL.md");
 }
 
 // src/commands/skill.ts
@@ -3411,7 +3437,16 @@ async function runFirstRun() {
 }
 
 // src/index.ts
-var VERSION = "0.1.0";
+var VERSION = "0.1.1";
+var NODE_MAJOR = Number(process.versions.node.split(".")[0]);
+if (Number.isFinite(NODE_MAJOR) && NODE_MAJOR < 20) {
+  process.stderr.write(
+    `AXON requires Node.js >= 20 \u2014 you have ${process.versions.node}.
+Upgrade at https://nodejs.org/ (or via nvm), then reinstall AXON.
+`
+  );
+  process.exit(1);
+}
 var program = new Command();
 program.name("axon").description("AXON \u2014 the terminal client for routing + execution-memory.").version(VERSION, "-v, --version", "Show CLI version.").showHelpAfterError(chalk18.dim("(run `axon --help` for command list)"));
 registerLogin(program);

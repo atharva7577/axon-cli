@@ -1,6 +1,6 @@
 {
   "name": "@axon/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AXON — the terminal-native client for the routing + execution-memory runtime.",
   "type": "module",
   "bin": {
@@ -43,6 +43,7 @@
     "chalk": "^5.4.1",
     "commander": "^14.0.0",
     "diff": "^8.0.2",
+    "minimatch": "^10.0.1",
     "ora": "^8.2.0",
     "prompts": "^2.4.2",
     "zod": "^3.25.0"
@@ -57,6 +58,6 @@
     "vitest": "^4.1.7"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   }
 }

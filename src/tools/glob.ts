@@ -1,16 +1,16 @@
 /**
  * glob — find files matching a pattern, newest-modified first.
  *
- * Uses Node 22+ `fs.glob`. Cap at 200 paths so the model can't pull in
- * a 10k-file repo in one shot.
+ * Uses the Node 20–compatible `globFiles` walker (see walk.ts). Cap at 200
+ * paths so the model can't pull in a 10k-file repo in one shot.
  */
 
-import { glob as fspGlob } from "node:fs/promises";
 import { promises as fsp } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ToolResult } from "./registry.js";
 import type { PermissionStore } from "../permissions.js";
 import { guardRead, isInsideRoot, workspaceRoot } from "./workspace.js";
+import { globFiles } from "./walk.js";
 
 const MAX_RESULTS = 200;
 
@@ -44,17 +44,16 @@ export async function glob(args: GlobArgs, perms: PermissionStore): Promise<Tool
   try {
     let outsideDropped = 0;
     const matches: string[] = [];
-    // fs/promises.glob is async iterable in Node 22+.
-    const iter = fspGlob(args.pattern, {
+    // Scan up to 2× the result cap so the mtime sort below has a candidate pool.
+    const found = await globFiles(args.pattern, {
       cwd,
-      exclude: (p: string) => DEFAULT_EXCLUDE.some((d) => p.includes(`/${d}/`) || p.startsWith(`${d}/`) || p === d),
-    } as Parameters<typeof fspGlob>[1]);
-    for await (const m of iter) {
-      const rel = m as string;
+      excludeDirs: DEFAULT_EXCLUDE,
+      max: MAX_RESULTS * 2,
+    });
+    for (const rel of found) {
       const abs = isAbsolute(rel) ? rel : resolve(cwd, rel);
       if (!isInsideRoot(abs, effectiveRoot)) { outsideDropped++; continue; }
       matches.push(rel);
-      if (matches.length >= MAX_RESULTS * 2) break;
     }
 
     // Sort by mtime desc when feasible (best-effort; skip stat failures).

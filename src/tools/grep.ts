@@ -6,12 +6,12 @@
  * "where is X defined" use case.
  */
 
-import { glob as fspGlob } from "node:fs/promises";
 import { promises as fsp } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { ToolResult } from "./registry.js";
 import type { PermissionStore } from "../permissions.js";
 import { canonicalize, isInsideRoot } from "./workspace.js";
+import { globFiles } from "./walk.js";
 
 const MAX_MATCHES = 100;
 const MAX_FILES = 50;
@@ -51,13 +51,9 @@ export async function grep(args: GrepArgs, _perms: PermissionStore): Promise<Too
   let truncated = false;
 
   try {
-    const iter = fspGlob(pattern, {
-      cwd,
-      exclude: (p: string) => DEFAULT_EXCLUDE.some((d) => p.includes(`/${d}/`) || p.startsWith(`${d}/`) || p === d),
-    } as Parameters<typeof fspGlob>[1]);
+    const found = await globFiles(pattern, { cwd, excludeDirs: DEFAULT_EXCLUDE });
 
-    for await (const relRaw of iter) {
-      const rel = relRaw as string;
+    for (const rel of found) {
       if (scanned >= MAX_FILES) { truncated = true; break; }
       if (results.length >= MAX_MATCHES) { truncated = true; break; }
       const abs = isAbsolute(rel) ? rel : resolve(cwd, rel);

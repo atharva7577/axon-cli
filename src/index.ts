@@ -29,7 +29,18 @@ import { runFirstRun, shouldRunFirstRun } from "./onboarding.js";
 import { runRepl } from "./repl.js";
 import { readConfig } from "./config.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
+
+// Fail friendly on an unsupported Node instead of a cryptic ESM/runtime error
+// deep in a dependency. Floor is 20 (commander@14 + our glob/grep walker).
+const NODE_MAJOR = Number(process.versions.node.split(".")[0]);
+if (Number.isFinite(NODE_MAJOR) && NODE_MAJOR < 20) {
+  process.stderr.write(
+    `AXON requires Node.js >= 20 — you have ${process.versions.node}.\n` +
+    `Upgrade at https://nodejs.org/ (or via nvm), then reinstall AXON.\n`,
+  );
+  process.exit(1);
+}
 
 const program = new Command();
 
