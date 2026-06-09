@@ -1,12 +1,15 @@
 {
   "name": "@axon/cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AXON — the terminal-native client for the routing + execution-memory runtime.",
   "type": "module",
   "bin": {
     "axon": "./dist/index.js",
     "axon-cli": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.ts",
@@ -14,6 +17,7 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

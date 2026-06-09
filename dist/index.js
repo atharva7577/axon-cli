@@ -3437,7 +3437,7 @@ async function runFirstRun() {
 }
 
 // src/index.ts
-var VERSION = "0.1.1";
+var VERSION = "0.1.2";
 var NODE_MAJOR = Number(process.versions.node.split(".")[0]);
 if (Number.isFinite(NODE_MAJOR) && NODE_MAJOR < 20) {
   process.stderr.write(

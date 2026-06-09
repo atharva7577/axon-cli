@@ -29,7 +29,7 @@ import { runFirstRun, shouldRunFirstRun } from "./onboarding.js";
 import { runRepl } from "./repl.js";
 import { readConfig } from "./config.js";
 
-const VERSION = "0.1.1";
+const VERSION = "0.1.2";
 
 // Fail friendly on an unsupported Node instead of a cryptic ESM/runtime error
 // deep in a dependency. Floor is 20 (commander@14 + our glob/grep walker).
