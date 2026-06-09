@@ -10,7 +10,8 @@ import chalk from "chalk";
 import type { PermissionStore } from "../permissions.js";
 import { readFile,  type ReadFileArgs  } from "./read.js";
 import { glob,      type GlobArgs      } from "./glob.js";
-import { grep,      type GrepArgs      } from "./grep.js";
+import { type GrepArgs } from "./grep.js";
+import { rg } from "./rg.js";
 import { ls,        type LsArgs        } from "./ls.js";
 import { bash,      type BashArgs      } from "./bash.js";
 import { writeFile, type WriteFileArgs } from "./write.js";
@@ -70,7 +71,7 @@ export async function dispatchTool(call: ToolCall, perms: PermissionStore): Prom
   switch (call.name) {
     case "read_file":  return readFile(args as unknown as ReadFileArgs, perms);
     case "glob":       return glob(args as unknown as GlobArgs, perms);
-    case "grep":       return grep(args as unknown as GrepArgs, perms);
+    case "grep":       return rg(args as unknown as GrepArgs, perms);
     case "ls":         return ls(args as unknown as LsArgs, perms);
     case "bash":       return bash(args as unknown as BashArgs, perms);
     case "write_file": return writeFile(args as unknown as WriteFileArgs, perms);

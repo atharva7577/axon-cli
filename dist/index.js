@@ -1021,6 +1021,9 @@ ${out}${note}`,
   }
 }
 
+// src/tools/rg.ts
+import { spawn as spawn2 } from "child_process";
+
 // src/tools/grep.ts
 import { promises as fsp3 } from "fs";
 import { isAbsolute as isAbsolute3, resolve as resolve3 } from "path";
@@ -1095,6 +1098,68 @@ ${results.join("\n")}` : `(no matches across ${scanned} file${scanned === 1 ? ""
   }
 }
 
+// src/tools/rg.ts
+var MAX_MATCHES2 = 200;
+var MAX_LINE_LEN = 300;
+var MAX_OUT_BYTES = 512e3;
+function runRipgrep(args, root) {
+  return new Promise((resolve8) => {
+    const rgArgs = ["--line-number", "--no-heading", "--color", "never", "--no-messages"];
+    if (args.case_insensitive) rgArgs.push("--ignore-case");
+    if (args.path_glob) rgArgs.push("--glob", args.path_glob);
+    rgArgs.push("--regexp", args.pattern, ".");
+    let out = "";
+    let err = "";
+    let settled = false;
+    const done = (r) => {
+      if (!settled) {
+        settled = true;
+        resolve8(r);
+      }
+    };
+    let child;
+    try {
+      child = spawn2("rg", rgArgs, { cwd: root });
+    } catch {
+      return done(null);
+    }
+    child.on("error", (e) => {
+      done(e?.code === "ENOENT" ? null : { ok: false, error: `grep: ${e.message}` });
+    });
+    child.stdout?.on("data", (d) => {
+      if (out.length < MAX_OUT_BYTES) out += d.toString("utf-8");
+    });
+    child.stderr?.on("data", (d) => {
+      err += d.toString("utf-8");
+    });
+    child.on("close", (code) => {
+      if (code === 2) {
+        done({ ok: false, error: `grep: ${err.trim() || "ripgrep search error"}` });
+        return;
+      }
+      const all = out.split("\n").filter(Boolean);
+      const truncated = all.length > MAX_MATCHES2;
+      const shown = all.slice(0, MAX_MATCHES2).map(
+        (l) => l.length > MAX_LINE_LEN ? l.slice(0, MAX_LINE_LEN) + "\u2026" : l
+      );
+      done({
+        ok: true,
+        result: shown.length > 0 ? `${shown.length}${truncated ? "+" : ""} match${shown.length === 1 ? "" : "es"} (ripgrep):
+${shown.join("\n")}` : "(no matches)",
+        truncated
+      });
+    });
+  });
+}
+async function rg(args, perms) {
+  if (!args.pattern || typeof args.pattern !== "string") {
+    return { ok: false, error: "grep: 'pattern' is required" };
+  }
+  const viaRg = await runRipgrep(args, workspaceRoot(process.cwd()));
+  if (viaRg !== null) return viaRg;
+  return grep(args, perms);
+}
+
 // src/tools/ls.ts
 import { promises as fs2 } from "fs";
 import { resolve as resolve4 } from "path";
@@ -1139,7 +1204,7 @@ ${rows.join("\n")}` : `(empty: ${target})`
 }
 
 // src/tools/bash.ts
-import { spawn as spawn2 } from "child_process";
+import { spawn as spawn3 } from "child_process";
 
 // src/tools/permKey.ts
 import { relative as relative2, isAbsolute as isAbsolute4, resolve as resolve5 } from "path";
@@ -1179,7 +1244,7 @@ ${args.command}` : `$ ${args.command}`
     let stdout = "";
     let stderr = "";
     let killed = false;
-    const child = spawn2(shell, [flag, args.command], { cwd: process.cwd(), env: process.env });
+    const child = spawn3(shell, [flag, args.command], { cwd: process.cwd(), env: process.env });
     const timer = setTimeout(() => {
       killed = true;
       try {
@@ -1683,7 +1748,7 @@ args: ${call.arguments}` };
     case "glob":
       return glob(args, perms);
     case "grep":
-      return grep(args, perms);
+      return rg(args, perms);
     case "ls":
       return ls(args, perms);
     case "bash":
