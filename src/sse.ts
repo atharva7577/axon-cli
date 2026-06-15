@@ -59,6 +59,10 @@ export interface SseRequestOptions {
   byok?:     { openai?: string; anthropic?: string; google?: string };
   signal?:   AbortSignal;
   timeoutMs?: number;
+  /** Layer 2 — re-request after an edit failed to apply: backend bumps to the
+   *  strongest tier and excludes `failedModel`. Sent as `x-axon-escalate: 1`. */
+  escalate?:    boolean;
+  failedModel?: string;
 }
 
 /**
@@ -82,6 +86,10 @@ export async function* streamChat(
   if (options.byok?.openai)    headers["x-openai-key"]    = options.byok.openai;
   if (options.byok?.anthropic) headers["x-anthropic-key"] = options.byok.anthropic;
   if (options.byok?.google)    headers["x-google-key"]    = options.byok.google;
+  if (options.escalate) {
+    headers["x-axon-escalate"] = "1";
+    if (options.failedModel) headers["x-axon-failed-model"] = options.failedModel;
+  }
 
   // Force stream:true even if caller forgot — this whole module is the
   // streaming consumer; calling non-stream would deadlock the SSE parser.

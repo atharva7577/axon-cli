@@ -19,6 +19,7 @@ import { streamChat, type SseFinalChunk } from "./sse.js";
 import { ALL_TOOLS, type ToolSchema } from "./tools/schemas.js";
 import { dispatchTool, dispatchMcpCall, type ToolCall, type ToolResult } from "./tools/registry.js";
 import { PermissionStore } from "./permissions.js";
+import { postEditorEvent } from "./editorEvents.js";
 import type { McpClientPool } from "./mcp/client.js";
 
 /** Per-call ceiling on accumulated tool-call arguments (OOM / runaway-stream guard). */
@@ -76,6 +77,7 @@ function formatMetaLine(final: SseFinalChunk): string | null {
 async function consumeStream(
   messages: ChatMessage[],
   opts:     AgentOptions,
+  escalate?: { failedModel?: string },
 ): Promise<{ assistant: ChatMessage; toolCalls: ToolCall[]; final: SseFinalChunk | null }> {
   const body = {
     model:    opts.model,
@@ -91,6 +93,8 @@ async function consumeStream(
     byok:    opts.byok,
     signal:  opts.signal,
     timeoutMs: 180_000,
+    escalate:    !!escalate,
+    failedModel: escalate?.failedModel,
   });
 
   let content = "";
@@ -152,13 +156,20 @@ export async function runAgentTurn(
 ): Promise<void> {
   const maxTurns = opts.maxTurns ?? 25;
   let lastFinal: SseFinalChunk | null = null;
+  // Layer 2 — bounded escalation state: on an edit apply-failure, retry the
+  // next turn on a stronger / different model (backend bumps tier + excludes
+  // the failed model). Capped so a model that keeps failing can't loop.
+  const EDIT_TOOLS = new Set(["edit_file", "write_file"]);
+  const MAX_ESCALATIONS = 2;
+  let escalate: { failedModel?: string } | null = null;
+  let escalations = 0;
 
   for (let turn = 0; turn < maxTurns; turn++) {
     let assistant: ChatMessage;
     let toolCalls: ToolCall[];
     let final: SseFinalChunk | null;
     try {
-      ({ assistant, toolCalls, final } = await consumeStream(messages, opts));
+      ({ assistant, toolCalls, final } = await consumeStream(messages, opts, escalate ?? undefined));
     } catch (err) {
       if (err instanceof AxonBackendError) {
         if (err.status === 401) {
@@ -188,6 +199,9 @@ export async function runAgentTurn(
     // Newline so the tool-call list isn't glued to streamed assistant text.
     process.stdout.write("\n");
 
+    let editFailedThisTurn = false;
+    const turnRequestId = (final?.meta as Record<string, unknown> | undefined)?.requestId as string | undefined;
+
     // Execute each tool call sequentially. Each result becomes a tool message.
     for (const call of toolCalls) {
       let result: ToolResult;
@@ -203,6 +217,14 @@ export async function runAgentTurn(
         + (result.truncated ? chalk.dim("  (truncated)") : "");
       console.log(preview);
 
+      // Layer 3 — report the edit outcome so routing learns which model lands
+      // edits (best-effort, non-blocking). Layer 2 — note a failure to escalate.
+      if (EDIT_TOOLS.has(call.name)) {
+        void postEditorEvent(result.ok ? "edit_accepted" : "edit_rejected", turnRequestId,
+          { apiBase: opts.apiBase, apiKey: opts.apiKey, signal: opts.signal });
+        if (!result.ok) editFailedThisTurn = true;
+      }
+
       messages.push({
         role:         "tool",
         tool_call_id: call.id,
@@ -213,6 +235,18 @@ export async function runAgentTurn(
           truncated: result.truncated,
         }),
       });
+    }
+
+    // Layer 2 — escalate the next turn if an edit failed to apply this turn.
+    if (editFailedThisTurn && escalations < MAX_ESCALATIONS) {
+      const failedModel = ((final?.meta as Record<string, unknown> | undefined)?.model as string | undefined)
+        ?? (final?.model as string | undefined);
+      escalate = { failedModel };
+      escalations++;
+      console.log(chalk.yellow(`    ↑ edit failed — escalating retry ${escalations}/${MAX_ESCALATIONS}${failedModel ? ` (excluding ${failedModel})` : ""}`));
+    } else {
+      escalate = null;
+      if (!editFailedThisTurn) escalations = 0;
     }
   }
 
