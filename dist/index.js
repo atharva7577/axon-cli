@@ -1347,6 +1347,9 @@ import { existsSync as existsSync3, promises as fs4 } from "fs";
 import { dirname as dirname3, isAbsolute as isAbsolute5, resolve as resolve6 } from "path";
 var PLACEHOLDER_PATTERNS = ["...", "// rest of code", "/* rest of code */"];
 function validateSearchReplace(edit) {
+  if (edit.search.trim().length === 0) {
+    return { valid: false, reason: "search block is empty \u2014 refusing (an empty search would overwrite the file)" };
+  }
   if (edit.search.includes("...")) {
     return { valid: false, reason: 'search block contains "..." placeholder \u2014 incomplete patch rejected' };
   }
@@ -1376,6 +1379,9 @@ function computeUpdatedContent(originalSource, edit) {
   const normSource = originalSource.replace(/\r\n/g, "\n");
   const normSearch = edit.search.replace(/\r\n/g, "\n");
   const replace = edit.replace.replace(/\r\n/g, "\n");
+  if (normSearch.trim().length === 0) {
+    throw new Error("[diff] search block is empty \u2014 refusing (an empty search would overwrite the file).");
+  }
   const idx = normSource.indexOf(normSearch);
   if (idx !== -1) {
     if (normSearch.length > 0 && normSource.indexOf(normSearch, idx + 1) !== -1) {

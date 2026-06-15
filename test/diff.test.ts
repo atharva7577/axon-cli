@@ -40,4 +40,9 @@ describe("computeUpdatedContent", () => {
     const src = "return 1\nx\nreturn 1\n";
     expect(() => computeUpdatedContent(src, edit("    return 1", "return 2"))).toThrow(/ambiguous/i);
   });
+
+  it("CRITICAL: refuses an empty search block (would overwrite the whole file)", () => {
+    expect(() => computeUpdatedContent("def f():\n    return 1\n", edit("", "x"))).toThrow(/empty/i);
+    expect(() => computeUpdatedContent("hello\n", edit("   ", "x"))).toThrow(/empty/i);
+  });
 });

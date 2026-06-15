@@ -60,6 +60,13 @@ export interface AppliedEdit {
 const PLACEHOLDER_PATTERNS = ["...", "// rest of code", "/* rest of code */"];
 
 export function validateSearchReplace(edit: SearchReplaceEdit): ValidationResult {
+  // An empty/whitespace-only search matches at offset 0, so the replace would
+  // silently overwrite the start of the file (data loss). A real targeted edit
+  // always has a concrete anchor — reject this outright. Full-file rewrites go
+  // through the newContent path, not search/replace.
+  if (edit.search.trim().length === 0) {
+    return { valid: false, reason: "search block is empty — refusing (an empty search would overwrite the file)" };
+  }
   if (edit.search.includes("...")) {
     return { valid: false, reason: 'search block contains "..." placeholder — incomplete patch rejected' };
   }
@@ -134,6 +141,14 @@ export function computeUpdatedContent(originalSource: string, edit: SearchReplac
   const normSource = originalSource.replace(/\r\n/g, "\n");
   const normSearch = edit.search.replace(/\r\n/g, "\n");
   const replace    = edit.replace.replace(/\r\n/g, "\n");
+
+  // An empty/whitespace-only search matches at offset 0 and the ambiguity guard
+  // below is skipped — it would silently overwrite the start of the file (data
+  // loss). A real targeted edit always has a concrete anchor. Full-file rewrites
+  // use the newContent path, not search/replace.
+  if (normSearch.trim().length === 0) {
+    throw new Error("[diff] search block is empty — refusing (an empty search would overwrite the file).");
+  }
 
   const idx = normSource.indexOf(normSearch);
   if (idx !== -1) {
