@@ -574,6 +574,10 @@ async function* streamChat(body, options) {
   if (options.byok?.openai) headers["x-openai-key"] = options.byok.openai;
   if (options.byok?.anthropic) headers["x-anthropic-key"] = options.byok.anthropic;
   if (options.byok?.google) headers["x-google-key"] = options.byok.google;
+  if (options.escalate) {
+    headers["x-axon-escalate"] = "1";
+    if (options.failedModel) headers["x-axon-failed-model"] = options.failedModel;
+  }
   const payload = { ...body, stream: true };
   const ctl = new AbortController();
   const timeoutMs = options.timeoutMs ?? 12e4;
@@ -1792,6 +1796,23 @@ async function dispatchMcpCall(pool, call, perms) {
   return pool.callTool(call.name, args);
 }
 
+// src/editorEvents.ts
+async function postEditorEvent(event, requestId, opts) {
+  if (!requestId || !opts.apiKey) return;
+  try {
+    const cfg = readConfig();
+    if (cfg.telemetry === false) return;
+    const apiBase = (opts.apiBase || cfg.apiBase).replace(/\/+$/, "");
+    await fetch(`${apiBase}/v1/editor/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${opts.apiKey}` },
+      body: JSON.stringify({ event, requestId, tenantId: "client", timestamp: Date.now() }),
+      signal: opts.signal
+    });
+  } catch {
+  }
+}
+
 // src/agent.ts
 var MAX_TOOL_ARGS_BYTES = 256e3;
 function formatMetaLine(final) {
@@ -1808,7 +1829,7 @@ function formatMetaLine(final) {
   const head = reasons.length > 0 ? `routed ${model} via ${reasons.join(", ")}` : `routed ${model}`;
   return tail.length > 0 ? `${head} (${tail.join(", ")})` : head;
 }
-async function consumeStream(messages, opts) {
+async function consumeStream(messages, opts, escalate) {
   const body = {
     model: opts.model,
     messages,
@@ -1822,7 +1843,9 @@ async function consumeStream(messages, opts) {
     apiKey: opts.apiKey,
     byok: opts.byok,
     signal: opts.signal,
-    timeoutMs: 18e4
+    timeoutMs: 18e4,
+    escalate: !!escalate,
+    failedModel: escalate?.failedModel
   });
   let content = "";
   let final = null;
@@ -1873,12 +1896,16 @@ async function consumeStream(messages, opts) {
 async function runAgentTurn(messages, perms, opts) {
   const maxTurns = opts.maxTurns ?? 25;
   let lastFinal = null;
+  const EDIT_TOOLS = /* @__PURE__ */ new Set(["edit_file", "write_file"]);
+  const MAX_ESCALATIONS = 2;
+  let escalate = null;
+  let escalations = 0;
   for (let turn = 0; turn < maxTurns; turn++) {
     let assistant;
     let toolCalls;
     let final;
     try {
-      ({ assistant, toolCalls, final } = await consumeStream(messages, opts));
+      ({ assistant, toolCalls, final } = await consumeStream(messages, opts, escalate ?? void 0));
     } catch (err) {
       if (err instanceof AxonBackendError) {
         if (err.status === 401) {
@@ -1902,6 +1929,8 @@ async function runAgentTurn(messages, perms, opts) {
       return;
     }
     process.stdout.write("\n");
+    let editFailedThisTurn = false;
+    const turnRequestId = final?.meta?.requestId;
     for (const call of toolCalls) {
       let result;
       try {
@@ -1911,6 +1940,14 @@ async function runAgentTurn(messages, perms, opts) {
       }
       const preview = (result.ok ? chalk10.green("    ok") : chalk10.red(`    \u2717 ${result.error}`)) + (result.truncated ? chalk10.dim("  (truncated)") : "");
       console.log(preview);
+      if (EDIT_TOOLS.has(call.name)) {
+        void postEditorEvent(
+          result.ok ? "edit_accepted" : "edit_rejected",
+          turnRequestId,
+          { apiBase: opts.apiBase, apiKey: opts.apiKey, signal: opts.signal }
+        );
+        if (!result.ok) editFailedThisTurn = true;
+      }
       messages.push({
         role: "tool",
         tool_call_id: call.id,
@@ -1921,6 +1958,15 @@ async function runAgentTurn(messages, perms, opts) {
           truncated: result.truncated
         })
       });
+    }
+    if (editFailedThisTurn && escalations < MAX_ESCALATIONS) {
+      const failedModel = final?.meta?.model ?? final?.model;
+      escalate = { failedModel };
+      escalations++;
+      console.log(chalk10.yellow(`    \u2191 edit failed \u2014 escalating retry ${escalations}/${MAX_ESCALATIONS}${failedModel ? ` (excluding ${failedModel})` : ""}`));
+    } else {
+      escalate = null;
+      if (!editFailedThisTurn) escalations = 0;
     }
   }
   console.log("");
@@ -3062,7 +3108,7 @@ var PendingEditState = class {
 
 // src/telemetry.ts
 import { basename as basename2 } from "path";
-async function postEditorEvent(input) {
+async function postEditorEvent2(input) {
   const cfg = readConfig();
   if (cfg.telemetry === false) return false;
   if (!cfg.apiKey) return false;
@@ -3182,8 +3228,8 @@ async function cmdApply(state) {
     );
     state.pending.setLastApplied(applied, p.requestId);
     state.pending.clearPending();
-    await postEditorEvent({ event: "edit_applied", requestId: p.requestId, filePath: applied.filePath });
-    await postEditorEvent({ event: "edit_accepted", requestId: p.requestId, filePath: applied.filePath });
+    await postEditorEvent2({ event: "edit_applied", requestId: p.requestId, filePath: applied.filePath });
+    await postEditorEvent2({ event: "edit_accepted", requestId: p.requestId, filePath: applied.filePath });
     console.log(chalk15.green(`\u2713 applied ${applied.filePath}`) + chalk15.dim(applied.wasNewFile ? "  (new file)" : ""));
   } catch (err) {
     console.error(chalk15.red(`\u2717 ${err.message}`));
@@ -3196,7 +3242,7 @@ async function cmdReject(state) {
     return;
   }
   state.pending.clearPending();
-  await postEditorEvent({ event: "edit_rejected", requestId: p.requestId, filePath: p.payload.filePath, method: "command" });
+  await postEditorEvent2({ event: "edit_rejected", requestId: p.requestId, filePath: p.payload.filePath, method: "command" });
   console.log(chalk15.yellow("\u2717 rejected") + chalk15.dim(" \u2014 fed back to routing memory"));
 }
 async function cmdUndo(state) {
@@ -3208,7 +3254,7 @@ async function cmdUndo(state) {
   try {
     await revertAppliedEdit(la.applied);
     state.pending.clearLastApplied();
-    await postEditorEvent({ event: "edit_rejected", requestId: la.requestId, filePath: la.applied.filePath, method: "undo" });
+    await postEditorEvent2({ event: "edit_rejected", requestId: la.requestId, filePath: la.applied.filePath, method: "undo" });
     console.log(chalk15.yellow(`\u21B6 reverted ${la.applied.filePath}`));
   } catch (err) {
     console.error(chalk15.red(`\u2717 ${err.message}`));
